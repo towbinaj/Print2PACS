@@ -187,7 +187,9 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     file_meta.ImplementationVersionName = IMPLEMENTATION_VERSION_NAME
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\x00" * 128)
-    ds.SpecificCharacterSet = "ISO_IR 100"
+    # UTF-8 so international characters and emoji in names/descriptions are
+    # represented correctly (Latin-1 cannot encode them).
+    ds.SpecificCharacterSet = "ISO_IR 192"
 
     # --- Patient Module ---
     ds.PatientName = context.patient_name or ""
@@ -213,6 +215,9 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
         ds.BodyPartExamined = series_info.body_part
     ds.SeriesDate = da
     ds.SeriesTime = tm
+
+    # --- General Equipment Module (Manufacturer is Type 2) ---
+    ds.Manufacturer = "Print2PACS"
 
     # --- SC Equipment Module ---
     ds.ConversionType = series_info.conversion_type or "WSD"

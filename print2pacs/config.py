@@ -21,6 +21,7 @@ class Settings:
     my_aetitle: str = "PRINT2PACS"
     appearance: str = "System"          # System / Light / Dark
     pdf_dpi: int = 200
+    keep_sent_copy: bool = False        # debug: keep the .dcm files we send
     # Remembered destinations by Node.name (query source + send target may differ).
     query_destination: str = ""
     send_destination: str = ""

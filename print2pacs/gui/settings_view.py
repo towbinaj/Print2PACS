@@ -91,6 +91,19 @@ class SettingsDialog(ctk.CTkToplevel):
         e.bind("<FocusOut>", lambda _e: self._save_app())
         r += 1
 
+        ctk.CTkLabel(self.body, text="Debug:").grid(row=r, column=0, sticky="w",
+                                                    pady=6, padx=(4, 8))
+        dbg = ctk.CTkFrame(self.body, fg_color="transparent")
+        dbg.grid(row=r, column=1, sticky="w", pady=6)
+        self.keep_var = ctk.BooleanVar(value=self.settings.keep_sent_copy)
+        ctk.CTkCheckBox(dbg, text="Keep a copy of sent DICOM",
+                        variable=self.keep_var,
+                        command=self._save_app).pack(side="left")
+        ctk.CTkButton(dbg, text="Open folder", width=90, fg_color="gray",
+                      command=self._open_jobs_folder).pack(side="left",
+                                                           padx=(10, 0))
+        r += 1
+
         from .. import __version__
         ctk.CTkLabel(self.body, text="Version:").grid(
             row=r, column=0, sticky="w", pady=6, padx=(4, 8))
@@ -107,6 +120,15 @@ class SettingsDialog(ctk.CTkToplevel):
     def _check_updates(self):
         self.app.check_updates(manual=True)
 
+    def _open_jobs_folder(self):
+        import os
+        from .. import paths
+        folder = paths.jobs_dir()
+        try:
+            os.startfile(str(folder))   # noqa: S606 - open the user's own folder
+        except Exception:  # noqa: BLE001
+            self._flash(f"Sent-copy folder: {folder}")
+
     def _on_appearance(self, value):
         ctk.set_appearance_mode(value)
         self._save_app()
@@ -119,6 +141,8 @@ class SettingsDialog(ctk.CTkToplevel):
             return
         self.settings.my_aetitle = ae
         self.settings.appearance = self.appear_var.get()
+        if hasattr(self, "keep_var"):
+            self.settings.keep_sent_copy = bool(self.keep_var.get())
         try:
             self.settings.pdf_dpi = max(50, min(600, int(self.dpi_var.get())))
         except ValueError:

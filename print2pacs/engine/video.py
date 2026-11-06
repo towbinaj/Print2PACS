@@ -164,7 +164,7 @@ def build_video_dataset(stream: bytes, meta: VideoMeta, context: StudyContext,
     file_meta.ImplementationVersionName = IMPLEMENTATION_VERSION_NAME
 
     ds = FileDataset(None, {}, file_meta=file_meta, preamble=b"\x00" * 128)
-    ds.SpecificCharacterSet = "ISO_IR 100"
+    ds.SpecificCharacterSet = "ISO_IR 192"   # UTF-8
 
     # Patient + existing study
     ds.PatientName = context.patient_name or ""
@@ -189,7 +189,8 @@ def build_video_dataset(stream: bytes, meta: VideoMeta, context: StudyContext,
     ds.SeriesDate = da
     ds.SeriesTime = tm
 
-    # SC equipment
+    # Equipment
+    ds.Manufacturer = "Print2PACS"
     ds.ConversionType = "DV"            # Digitized Video
     ds.SecondaryCaptureDeviceManufacturer = "Print2PACS"
 

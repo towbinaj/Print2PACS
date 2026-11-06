@@ -7,6 +7,7 @@ Designed for non-IT users: three clear steps, drag-and-drop, and a single
 from __future__ import annotations
 
 import os
+import time
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -22,7 +23,8 @@ except Exception:  # noqa: BLE001
 from .. import APP_NAME, __version__, config, paths
 from ..engine import reconcile, sc_import, send, video
 from ..logging_setup import get_logger, setup as setup_logging
-from ..model import CONVERSION_TYPES, SeriesInfo, StudyContext
+from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SeriesInfo,
+                     StudyContext)
 from ..net import scu
 from . import theme
 from .dialogs import AddDestinationDialog
@@ -248,8 +250,10 @@ class App(*_APP_BASES):
         ctk.CTkLabel(series, text="Body part:").grid(row=3, column=0,
                                                      sticky="w", padx=12, pady=6)
         self.body_var = ctk.StringVar()
-        ctk.CTkEntry(series, textvariable=self.body_var).grid(
-            row=3, column=1, sticky="ew", padx=6, pady=6)
+        # Editable: pick a standard DICOM term or type a custom one / leave blank.
+        ctk.CTkComboBox(series, variable=self.body_var,
+                        values=[""] + BODY_PARTS_EXAMINED, width=240).grid(
+            row=3, column=1, sticky="w", padx=6, pady=6)
 
         ctk.CTkLabel(series, text="Capture type:").grid(row=4, column=0,
                                                         sticky="w", padx=12,
@@ -742,7 +746,7 @@ class App(*_APP_BASES):
         return SeriesInfo(
             modality=self.modality_var.get().strip() or "OT",
             series_description=self.desc_var.get().strip(),
-            body_part=self.body_var.get().strip(),
+            body_part=self.body_var.get().strip().upper(),
             series_number=self.settings.default_series_number,
             conversion_type=conv or "WSD",
         )
@@ -778,7 +782,9 @@ class App(*_APP_BASES):
         pages = list(self.pages)
         videos = list(self.videos)
         my_ae = self.settings.my_aetitle
-        job_dir = paths.jobs_dir() / f"job_{study.accession or 'x'}"
+        keep = self.settings.keep_sent_copy
+        job_dir = paths.jobs_dir() / (f"job_{study.accession or 'x'}_"
+                                      f"{time.strftime('%Y%m%d_%H%M%S')}")
 
         def prog(msg):
             try:
@@ -801,24 +807,27 @@ class App(*_APP_BASES):
                 # each video becomes its own new series
                 datasets.append(video.convert_video(vpath, study, si))
             return send.send_series(my_ae, node, datasets, job_dir,
-                                    progress=prog, on_frac=frac)
+                                    progress=prog, on_frac=frac,
+                                    cleanup=not keep)
 
         def done(result):
             self._sending = False
             self.back_btn.configure(state="normal")
             self.next_btn.configure(state="normal")
+            kept = (f"\n\nA copy of the sent DICOM is in:\n{job_dir}"
+                    if keep else "")
             if result.failed == 0 and result.sent > 0:
                 self.progress.set(1)
                 messagebox.showinfo(
                     APP_NAME,
                     f"Sent {result.sent} object(s) to PACS successfully.\n\n"
-                    f"New series added to accession {study.accession}.")
+                    f"New series added to accession {study.accession}.{kept}")
                 self._reset_after_send()
             else:
                 detail = "\n".join(result.errors[:8]) or "Unknown error."
                 messagebox.showerror(
                     APP_NAME,
-                    f"Sent {result.sent}, failed {result.failed}.\n\n{detail}")
+                    f"Sent {result.sent}, failed {result.failed}.\n\n{detail}{kept}")
 
         def err(exc):
             self._sending = False

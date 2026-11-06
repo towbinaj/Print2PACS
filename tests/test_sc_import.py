@@ -136,6 +136,23 @@ def test_save_and_reread(tmp_path):
     assert re.pixel_array.shape == (10, 20, 3)
 
 
+def test_charset_and_manufacturer():
+    ds = sc_import.build_sc_dataset(Image.new("L", (4, 4), 0), CTX, SI,
+                                    series_uid="1", instance_number=1)
+    assert ds.SpecificCharacterSet == "ISO_IR 192"     # UTF-8
+    assert ds.Manufacturer == "Print2PACS"             # Type-2 present
+
+
+def test_unicode_emoji_name_roundtrips(tmp_path):
+    ctx = StudyContext(patient_id="P", patient_name="TEST^\U0001F600é",
+                       study_uid="1.2.3")
+    out = sc_import.convert_pages([_page("L", (8, 8), 0)], ctx, SI)
+    files = sc_import.save_datasets(out, tmp_path)
+    re = dcmread(str(files[0]))
+    assert str(re.PatientName) == "TEST^\U0001F600é"
+    assert re.SpecificCharacterSet == "ISO_IR 192"
+
+
 def test_multiframe_tiff(tmp_path):
     p = tmp_path / "multi.tiff"
     frames = [Image.new("L", (12, 8), v) for v in (10, 20, 30)]
