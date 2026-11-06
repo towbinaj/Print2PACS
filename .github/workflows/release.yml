@@ -1,0 +1,111 @@
+name: Release
+
+# Release from the commit message - no buttons, no manual tags. Put a marker in
+# a commit SUBJECT on main to cut a release (default bump = patch):
+#     fix wrong body part [release]           -> patch  (vX.Y.Z+1)
+#     add video support [release minor]       -> minor  (vX.Y+1.0)
+#     breaking config change [release major]  -> major  (vX+1.0.0)
+# Commits without a [release] marker build nothing. A manually pushed vX.Y.Z tag
+# also triggers a build (fallback).
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Decide version
+        id: ver
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $v = "$env:GITHUB_REF_NAME".TrimStart('v')
+            "do=true"    | Out-File $env:GITHUB_OUTPUT -Append
+            "version=$v" | Out-File $env:GITHUB_OUTPUT -Append
+            "tag=v$v"    | Out-File $env:GITHUB_OUTPUT -Append
+            Write-Host "Manual tag release: v$v"
+          } else {
+            $full = @'
+          ${{ github.event.head_commit.message }}
+          '@
+            $subject = ($full -split "`n")[0]
+            if ($subject -match '\[release(?:\s*[: ]\s*(major|minor|patch))?\]') {
+              $bump = if ($Matches[1]) { $Matches[1] } else { 'patch' }
+              $last = (git tag --list 'v*' --sort=-v:refname | Select-Object -First 1)
+              if (-not $last) { $last = 'v0.0.0' }
+              $p = $last.TrimStart('v').Split('.')
+              $maj=[int]$p[0]; $min=[int]$p[1]; $pat=[int]$p[2]
+              switch ($bump) {
+                'major' { $maj++; $min=0; $pat=0 }
+                'minor' { $min++; $pat=0 }
+                default { $pat++ }
+              }
+              $v = "$maj.$min.$pat"
+              "do=true"    | Out-File $env:GITHUB_OUTPUT -Append
+              "version=$v" | Out-File $env:GITHUB_OUTPUT -Append
+              "tag=v$v"    | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "Commit requests '$bump' bump: $last -> v$v"
+            } else {
+              "do=false" | Out-File $env:GITHUB_OUTPUT -Append
+              Write-Host "No [release] marker - nothing to release."
+            }
+          }
+
+      - name: Set up Python
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Stamp version
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        shell: pwsh
+        run: |
+          (Get-Content print2pacs/__init__.py) `
+            -replace '__version__\s*=\s*".*"', "__version__ = `"${{ steps.ver.outputs.version }}`"" |
+            Set-Content print2pacs/__init__.py
+
+      - name: Install dependencies
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt -r requirements-dev.txt
+
+      - name: Fetch ffmpeg (bundled for video)
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        run: python scripts/fetch_ffmpeg.py
+
+      - name: Run tests
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        run: python -m pytest -q
+
+      - name: Build exe
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        run: pyinstaller Print2PACS.spec --noconfirm --clean
+
+      - name: Compute SHA-256
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash dist/Print2PACS.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  Print2PACS.exe" | Out-File -Encoding ascii dist/Print2PACS.exe.sha256
+          Write-Host "SHA-256: $h"
+
+      - name: Publish release
+        if: ${{ success() && steps.ver.outputs.do == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.ver.outputs.tag }}
+          files: |
+            dist/Print2PACS.exe
+            dist/Print2PACS.exe.sha256
+          generate_release_notes: true

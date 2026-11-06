@@ -1,0 +1,31 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Build artifacts
+build/
+dist/
+*.spec.bak
+
+# Bundled ffmpeg (fetched by scripts/fetch_ffmpeg.py; too large for git)
+assets/ffmpeg/
+
+# App data (real AE titles / hosts / PHI live here — never commit)
+Print2PACS-data/
+/data/destinations.json
+/data/settings.json
+
+# Legacy commercial tool + real site config (kept locally as reference only)
+OldVersion/
+
+# Foreign / site config that happens to live in this folder (never commit)
+DCMsettings.json
+
+# Editor / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db

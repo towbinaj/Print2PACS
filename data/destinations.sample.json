@@ -1,0 +1,12 @@
+[
+  {
+    "name": "Test PACS (example)",
+    "aetitle": "TESTPACS",
+    "host": "192.0.2.10",
+    "port": 104,
+    "note": "Placeholder - RFC 5737 doc IP. Copy this file to your data folder as destinations.json and edit with your real values.",
+    "timeout": 30,
+    "tls": false,
+    "calling_aetitle": "PRINT2PACS"
+  }
+]
