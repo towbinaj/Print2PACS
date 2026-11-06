@@ -7,6 +7,7 @@ Designed for non-IT users: three clear steps, drag-and-drop, and a single
 from __future__ import annotations
 
 import os
+import sys
 import time
 from tkinter import filedialog, messagebox
 
@@ -863,7 +864,39 @@ class App(*_APP_BASES):
             pass
 
 
+# --- single-instance guard (prevents two windows -> accidental double sends) ---
+_mutex_handle = None
+_MUTEX_NAME = "Print2PACS.SingleInstance"
+
+
+def _acquire_single_instance() -> bool:
+    """True if we are the only instance; False if one is already running."""
+    global _mutex_handle
+    if sys.platform != "win32":
+        return True
+    try:
+        import ctypes
+        k = ctypes.windll.kernel32
+        _mutex_handle = k.CreateMutexW(None, False, _MUTEX_NAME)
+        return k.GetLastError() != 183          # ERROR_ALREADY_EXISTS
+    except Exception:  # noqa: BLE001 - never block launch on the guard itself
+        return True
+
+
+def _warn_already_running() -> None:
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(
+            0, "Print2PACS is already running. Use the open window.",
+            "Print2PACS", 0x40)
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main():
+    if not _acquire_single_instance():
+        _warn_already_running()
+        return
     App().mainloop()
 
 

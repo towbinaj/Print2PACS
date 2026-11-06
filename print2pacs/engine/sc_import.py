@@ -241,6 +241,9 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     if spp == 3:
         ds.PlanarConfiguration = 0
     ds.PixelData = pixel_bytes
+    # 8-bit uncompressed pixel data must be VR OB (pydicom defaults to OW, which
+    # strict archives such as Merge VNA reject for BitsAllocated=8).
+    ds["PixelData"].VR = "OB"
 
     # --- SOP Common ---
     ds.SOPClassUID = SC_SOP_CLASS_UID

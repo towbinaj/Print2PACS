@@ -136,6 +136,16 @@ def test_save_and_reread(tmp_path):
     assert re.pixel_array.shape == (10, 20, 3)
 
 
+def test_pixeldata_vr_is_ob_for_8bit():
+    # 8-bit uncompressed pixel data must be OB (not OW) or strict archives reject.
+    rgb = sc_import.build_sc_dataset(Image.new("RGB", (8, 8), (1, 2, 3)), CTX,
+                                     SI, series_uid="1", instance_number=1)
+    assert rgb["PixelData"].VR == "OB"
+    gray = sc_import.build_sc_dataset(Image.new("L", (8, 8), 0), CTX, SI,
+                                      series_uid="1", instance_number=1)
+    assert gray["PixelData"].VR == "OB"
+
+
 def test_charset_and_manufacturer():
     ds = sc_import.build_sc_dataset(Image.new("L", (4, 4), 0), CTX, SI,
                                     series_uid="1", instance_number=1)
