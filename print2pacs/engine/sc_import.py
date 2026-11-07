@@ -35,6 +35,32 @@ SUPPORTED_EXTS = RASTER_EXTS | PDF_EXTS
 # Default DPI for rasterizing PDF pages.
 PDF_RENDER_DPI = 200
 
+# Suggested DICOM Modality per source type, used by the "Auto (by type)" default.
+# Documents/scans -> OT; photographs -> XC (External-camera Photography).
+MODALITY_BY_EXT = {
+    ".pdf": "OT", ".tif": "OT", ".tiff": "OT",
+    ".jpg": "XC", ".jpeg": "XC", ".png": "XC", ".bmp": "XC",
+}
+DEFAULT_MODALITY = "OT"
+
+
+def suggest_modality(name: str | Path) -> str:
+    """Modality to default for a source file, by extension (fallback OT)."""
+    return MODALITY_BY_EXT.get(Path(name).suffix.lower(), DEFAULT_MODALITY)
+
+
+def group_pages_by_modality(
+        pages: list["SourcePage"]) -> "dict[str, list[SourcePage]]":
+    """Group loaded pages by their suggested modality, preserving order.
+
+    Used by the "Auto (by type)" mode so a mixed drop (e.g. a PDF plus JPEGs)
+    files as one series per modality (PDF->OT, photos->XC).
+    """
+    groups: dict[str, list[SourcePage]] = {}
+    for pg in pages:
+        groups.setdefault(suggest_modality(pg.source), []).append(pg)
+    return groups
+
 
 class UnsupportedSource(Exception):
     pass
@@ -161,9 +187,21 @@ def _normalize(img: Image.Image) -> tuple[Image.Image, str, int]:
 # ---------------------------------------------------------------------------
 # Building one Secondary Capture dataset
 # ---------------------------------------------------------------------------
+def _apply_compression(ds: FileDataset, mode: str) -> None:
+    """Re-encode the pixel data in place. 'rle' = RLE Lossless (built-in,
+    lossless, well supported; shrinks document/white images a lot)."""
+    if not mode or mode == "none":
+        return
+    if mode == "rle":
+        from pydicom.uid import RLELossless
+        ds.compress(RLELossless)
+    else:
+        raise ValueError(f"Unknown compression mode: {mode}")
+
+
 def build_sc_dataset(image: Image.Image, context: StudyContext,
                      series_info: SeriesInfo, *, series_uid: str,
-                     instance_number: int,
+                     instance_number: int, compression: str = "none",
                      when: datetime.datetime | None = None) -> FileDataset:
     """Create a single Secondary Capture Image dataset from a PIL image."""
     if not context.study_uid:
@@ -245,6 +283,13 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     # strict archives such as Merge VNA reject for BitsAllocated=8).
     ds["PixelData"].VR = "OB"
 
+    # SOP Common must be set before we (optionally) re-encode the pixels.
+    ds.SOPClassUID = SC_SOP_CLASS_UID
+    ds.SOPInstanceUID = sop_uid
+    if compression and compression != "none":
+        _apply_compression(ds, compression)
+        return ds
+
     # --- SOP Common ---
     ds.SOPClassUID = SC_SOP_CLASS_UID
     ds.SOPInstanceUID = sop_uid
@@ -256,8 +301,8 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
 # Converting a batch of pages into a series of SC datasets
 # ---------------------------------------------------------------------------
 def convert_pages(pages: list[SourcePage], context: StudyContext,
-                  series_info: SeriesInfo, *,
-                  series_uid: str | None = None) -> list[FileDataset]:
+                  series_info: SeriesInfo, *, series_uid: str | None = None,
+                  compression: str = "none") -> list[FileDataset]:
     """Convert loaded pages into one coherent Secondary Capture series."""
     series_uid = series_uid or generate_uid()
     when = datetime.datetime.now()
@@ -265,7 +310,7 @@ def convert_pages(pages: list[SourcePage], context: StudyContext,
     for i, page in enumerate(pages, 1):
         ds = build_sc_dataset(page.image, context, series_info,
                               series_uid=series_uid, instance_number=i,
-                              when=when)
+                              compression=compression, when=when)
         out.append(ds)
     log.info("Converted %d page(s) to SC series %s", len(out), series_uid)
     return out
@@ -273,10 +318,12 @@ def convert_pages(pages: list[SourcePage], context: StudyContext,
 
 def convert_paths(paths: Iterable[str | Path], context: StudyContext,
                   series_info: SeriesInfo, *, pdf_dpi: int = PDF_RENDER_DPI,
-                  series_uid: str | None = None) -> list[FileDataset]:
+                  series_uid: str | None = None,
+                  compression: str = "none") -> list[FileDataset]:
     """Load source files and convert them into a Secondary Capture series."""
     pages = load_many(paths, pdf_dpi)
-    return convert_pages(pages, context, series_info, series_uid=series_uid)
+    return convert_pages(pages, context, series_info, series_uid=series_uid,
+                         compression=compression)
 
 
 def save_datasets(datasets: list[FileDataset], out_dir: str | Path) -> list[Path]:

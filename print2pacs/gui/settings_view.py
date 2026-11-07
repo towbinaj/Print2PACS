@@ -82,6 +82,27 @@ class SettingsDialog(ctk.CTkToplevel):
         e.bind("<FocusOut>", lambda _e: self._save_app())
         r += 1
 
+        ctk.CTkLabel(self.body, text="Image compression:").grid(
+            row=r, column=0, sticky="w", pady=6, padx=(4, 8))
+        self._comp_map = {"None": "none", "RLE Lossless": "rle"}
+        self._comp_rev = {v: k for k, v in self._comp_map.items()}
+        self.comp_var = ctk.StringVar(
+            value=self._comp_rev.get(self.settings.image_compression, "None"))
+        ctk.CTkOptionMenu(self.body, variable=self.comp_var,
+                          values=list(self._comp_map), width=160,
+                          command=lambda _v: self._save_app()).grid(
+            row=r, column=1, sticky="w", pady=6)
+        r += 1
+
+        ctk.CTkLabel(self.body, text="Imported DICOM:").grid(
+            row=r, column=0, sticky="w", pady=6, padx=(4, 8))
+        self.strip_var = ctk.BooleanVar(value=self.settings.strip_private_tags)
+        ctk.CTkCheckBox(
+            self.body, text="Strip private/vendor tags before sending",
+            variable=self.strip_var, command=self._save_app).grid(
+            row=r, column=1, sticky="w", pady=6)
+        r += 1
+
         ctk.CTkLabel(self.body, text="Series number:").grid(
             row=r, column=0, sticky="w", pady=6, padx=(4, 8))
         self.series_var = ctk.StringVar(
@@ -143,6 +164,11 @@ class SettingsDialog(ctk.CTkToplevel):
         self.settings.appearance = self.appear_var.get()
         if hasattr(self, "keep_var"):
             self.settings.keep_sent_copy = bool(self.keep_var.get())
+        if hasattr(self, "comp_var"):
+            self.settings.image_compression = self._comp_map.get(
+                self.comp_var.get(), "none")
+        if hasattr(self, "strip_var"):
+            self.settings.strip_private_tags = bool(self.strip_var.get())
         try:
             self.settings.pdf_dpi = max(50, min(600, int(self.dpi_var.get())))
         except ValueError:

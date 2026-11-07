@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import sys
 import time
+from dataclasses import replace
 from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
@@ -22,7 +23,7 @@ except Exception:  # noqa: BLE001
     _HAS_DND = False
 
 from .. import APP_NAME, __version__, config, paths
-from ..engine import reconcile, sc_import, send, video
+from ..engine import dicom_import, reconcile, sc_import, send, video
 from ..logging_setup import get_logger, setup as setup_logging
 from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SeriesInfo,
                      StudyContext)
@@ -34,6 +35,10 @@ from .widgets import run_threaded
 log = get_logger("gui")
 
 _APP_BASES = (ctk.CTk, TkinterDnD.DnDWrapper) if _HAS_DND else (ctk.CTk,)
+
+# Modality dropdown: sentinel for per-file-type auto selection, then manual codes.
+AUTO_MODALITY = "Auto (by type)"
+MODALITY_VALUES = [AUTO_MODALITY, "OT", "SC", "XC", "DOC", "CR", "DX"]
 
 
 class App(*_APP_BASES):
@@ -69,6 +74,8 @@ class App(*_APP_BASES):
         self.pages: list[sc_import.SourcePage] = []
         # videos: list of (path, VideoMeta, pil_thumb_or_None)
         self.videos: list[tuple] = []
+        # dicoms: existing DICOM objects to re-file onto the chosen study
+        self.dicoms: list[dicom_import.DicomSource] = []
         self._thumb_imgs: list = []          # keep CTkImage refs alive
         self.studies: list[StudyContext] = []
         self.chosen_study: StudyContext | None = None
@@ -83,6 +90,7 @@ class App(*_APP_BASES):
         self._build_nav()
         self._build_statusbar()
         self._show_step(1)
+        self._enable_window_drop()
 
         # Quiet background update check (built exe only).
         from .. import updater
@@ -132,7 +140,7 @@ class App(*_APP_BASES):
                                  corner_radius=10)
         self.drop.grid(row=0, column=0, sticky="ew", pady=(0, 10))
         self.drop.grid_propagate(False)
-        msg = ("Drag images or a PDF here  —  or  "
+        msg = ("Drop files anywhere in this window  —  or  "
                if self._dnd_ok else "")
         inner = ctk.CTkFrame(self.drop, fg_color="transparent")
         inner.place(relx=0.5, rely=0.5, anchor="center")
@@ -140,7 +148,7 @@ class App(*_APP_BASES):
         ctk.CTkButton(inner, text="Add files…", width=120,
                       command=self._add_files).pack(side="left")
         ctk.CTkLabel(f, text="Images: JPG · PNG · TIFF · BMP · PDF      "
-                             "Video: MP4 · MOV · AVI · MKV",
+                             "Video: MP4 · MOV · AVI · MKV      DICOM: .dcm",
                      text_color=theme.MUTED,
                      font=ctk.CTkFont(size=11)).grid(row=0, column=0,
                                                      sticky="s", pady=(0, 2))
@@ -236,10 +244,18 @@ class App(*_APP_BASES):
 
         ctk.CTkLabel(series, text="Modality:").grid(row=1, column=0, sticky="w",
                                                     padx=12, pady=6)
-        self.modality_var = ctk.StringVar(value=self.settings.default_modality)
+        init_mod = (self.settings.default_modality
+                    if self.settings.default_modality in MODALITY_VALUES
+                    else AUTO_MODALITY)
+        self.modality_var = ctk.StringVar(value=init_mod)
         ctk.CTkOptionMenu(series, variable=self.modality_var,
-                          values=["OT", "SC", "XC", "DOC", "CR", "DX"],
-                          width=120).grid(row=1, column=1, sticky="w", padx=6)
+                          values=MODALITY_VALUES, width=160).grid(
+            row=1, column=1, sticky="w", padx=6)
+        ctk.CTkLabel(series,
+                     text="Auto: PDF/TIFF→OT, photos→XC; dropped DICOM keeps its own.",
+                     text_color=theme.MUTED,
+                     font=ctk.CTkFont(size=11)).grid(
+            row=1, column=2, sticky="w", padx=(6, 12))
 
         ctk.CTkLabel(series, text="Series description:").grid(
             row=2, column=0, sticky="w", padx=12, pady=6)
@@ -429,9 +445,9 @@ class App(*_APP_BASES):
 
     def _next(self):
         if self._step == 1:
-            if not self.pages and not self.videos:
-                messagebox.showwarning(APP_NAME,
-                                       "Add at least one image or video first.")
+            if not self.pages and not self.videos and not self.dicoms:
+                messagebox.showwarning(
+                    APP_NAME, "Add at least one image, video or DICOM first.")
                 return
             self._show_step(2)
         elif self._step == 2:
@@ -448,15 +464,17 @@ class App(*_APP_BASES):
     # =====================================================================
     @staticmethod
     def _is_accepted(p):
-        return sc_import.is_supported(p) or video.is_video(p)
+        return (sc_import.is_supported(p) or video.is_video(p)
+                or dicom_import.is_dicom(p))
 
     def _add_files(self):
         img = " ".join(f"*{e}" for e in sorted(sc_import.SUPPORTED_EXTS))
         vid = " ".join(f"*{e}" for e in sorted(video.VIDEO_EXTS))
+        dcm = " ".join(f"*{e}" for e in sorted(dicom_import.DICOM_EXTS))
         files = filedialog.askopenfilenames(
-            title="Select images, PDF, or video",
+            title="Select images, PDF, video, or DICOM",
             filetypes=[("Images / PDF", img), ("Video", vid),
-                       ("All files", "*.*")])
+                       ("DICOM", dcm), ("All files", "*.*")])
         if files:
             self._ingest(list(files))
 
@@ -469,10 +487,15 @@ class App(*_APP_BASES):
         if not accepted:
             messagebox.showwarning(
                 APP_NAME, "No supported files. Accepted: images (JPG/PNG/TIFF/"
-                "BMP/PDF) and video (MP4/MOV/AVI/MKV).")
+                "BMP/PDF), video (MP4/MOV/AVI/MKV) and DICOM objects (.dcm).")
             return
+        # Classify by precedence: image/PDF -> video -> DICOM (no double counting).
         img_paths = [p for p in accepted if sc_import.is_supported(p)]
-        vid_paths = [p for p in accepted if video.is_video(p)]
+        vid_paths = [p for p in accepted
+                     if not sc_import.is_supported(p) and video.is_video(p)]
+        dcm_paths = [p for p in accepted
+                     if not sc_import.is_supported(p) and not video.is_video(p)
+                     and dicom_import.is_dicom(p)]
 
         def work():
             pages = sc_import.load_many(img_paths, self.settings.pdf_dpi)
@@ -481,12 +504,14 @@ class App(*_APP_BASES):
                 meta = video.probe(vp)            # runs ffmpeg
                 thumb = video.first_frame(vp)
                 vids.append((vp, meta, thumb))
-            return pages, vids
+            dcms = [dicom_import.load_dicom(dp) for dp in dcm_paths]
+            return pages, vids, dcms
 
         def done(result):
-            pages, vids = result
+            pages, vids, dcms = result
             self.pages.extend(pages)
             self.videos.extend(vids)
+            self.dicoms.extend(dcms)
             self._refresh_thumbs()
             if skipped:
                 self.count_lbl.configure(
@@ -503,7 +528,7 @@ class App(*_APP_BASES):
         run_threaded(self, work, done, err)
 
     def _item_count(self):
-        return len(self.pages) + len(self.videos)
+        return len(self.pages) + len(self.videos) + len(self.dicoms)
 
     def _refresh_thumbs(self):
         for w in self.thumb_list.winfo_children():
@@ -563,12 +588,31 @@ class App(*_APP_BASES):
                           command=lambda k=j: self._remove_video(k)).grid(
                 row=0, column=4, padx=(2, 8))
 
-        n_img, n_vid = len(self.pages), len(self.videos)
+        base2 = len(self.pages) + len(self.videos)
+        for m, src in enumerate(self.dicoms):
+            row = ctk.CTkFrame(self.thumb_list)
+            row.grid(row=base2 + m, column=0, sticky="ew", pady=3, padx=2)
+            row.grid_columnconfigure(1, weight=1)
+            ctk.CTkLabel(row, text="🩻", width=84,
+                         font=ctk.CTkFont(size=28)).grid(
+                row=0, column=0, rowspan=2, padx=8, pady=6)
+            from pathlib import Path as _P
+            ctk.CTkLabel(
+                row, anchor="w", justify="left",
+                text=f"🩻 {_P(src.path).name}\n{src.label} → re-filed").grid(
+                row=0, column=1, rowspan=2, sticky="w")
+            ctk.CTkButton(row, text="✕", width=30, fg_color=theme.DANGER,
+                          command=lambda k=m: self._remove_dicom(k)).grid(
+                row=0, column=4, padx=(2, 8))
+
+        n_img, n_vid, n_dcm = len(self.pages), len(self.videos), len(self.dicoms)
         parts = []
         if n_img:
             parts.append(f"{n_img} image page(s)")
         if n_vid:
             parts.append(f"{n_vid} video(s)")
+        if n_dcm:
+            parts.append(f"{n_dcm} DICOM object(s)")
         self.count_lbl.configure(
             text="To send: " + (", ".join(parts) if parts else "nothing yet"))
 
@@ -586,6 +630,11 @@ class App(*_APP_BASES):
     def _remove_video(self, idx):
         if 0 <= idx < len(self.videos):
             del self.videos[idx]
+            self._refresh_thumbs()
+
+    def _remove_dicom(self, idx):
+        if 0 <= idx < len(self.dicoms):
+            del self.dicoms[idx]
             self._refresh_thumbs()
 
     # =====================================================================
@@ -736,16 +785,25 @@ class App(*_APP_BASES):
             bits.append(f"{len(self.pages)} image page(s)")
         if self.videos:
             bits.append(f"{len(self.videos)} video(s)")
+        if self.dicoms:
+            bits.append(f"{len(self.dicoms)} DICOM object(s)")
+        note = ("\nDropped DICOM objects keep their original modality/type; "
+                "patient & study tags are re-stamped to this study."
+                if self.dicoms else "")
         self.confirm_lbl.configure(text=(
             f"Patient:  {name}   (ID {s.patient_id})\n"
             f"Study:  Acc {s.accession} · {s.study_description or '—'} · "
             f"{s.study_date or '—'}\n"
-            f"To send:  {', '.join(bits) or 'nothing'}"))
+            f"To send:  {', '.join(bits) or 'nothing'}{note}"))
 
     def _series_info(self) -> SeriesInfo:
         conv = self.conv_var.get().split(" - ")[0].strip()
+        sel = self.modality_var.get().strip()
+        # In Auto mode the per-series modality is chosen at send time; carry a
+        # safe placeholder here (still used for validation / non-image series).
+        modality = "OT" if sel == AUTO_MODALITY else (sel or "OT")
         return SeriesInfo(
-            modality=self.modality_var.get().strip() or "OT",
+            modality=modality,
             series_description=self.desc_var.get().strip(),
             body_part=self.body_var.get().strip().upper(),
             series_number=self.settings.default_series_number,
@@ -757,7 +815,8 @@ class App(*_APP_BASES):
             return
         node = self._send_node()
         if not node or not self.chosen_study or (not self.pages
-                                                 and not self.videos):
+                                                 and not self.videos
+                                                 and not self.dicoms):
             messagebox.showwarning(APP_NAME,
                                    "Missing study, PACS, or items to send.")
             return
@@ -766,9 +825,9 @@ class App(*_APP_BASES):
             messagebox.showwarning(APP_NAME, "Enter a series description.")
             return
 
-        # persist defaults for next time
+        # persist defaults for next time (keep the raw selection, incl. Auto)
         self.settings.send_destination = node.name
-        self.settings.default_modality = si.modality
+        self.settings.default_modality = self.modality_var.get()
         self.settings.default_series_description = si.series_description
         self.settings.default_conversion_type = si.conversion_type
         config.save_settings(self.settings)
@@ -782,8 +841,13 @@ class App(*_APP_BASES):
         study = self.chosen_study
         pages = list(self.pages)
         videos = list(self.videos)
+        dicoms = list(self.dicoms)
         my_ae = self.settings.my_aetitle
         keep = self.settings.keep_sent_copy
+        comp = self.settings.image_compression
+        strip_private = self.settings.strip_private_tags
+        auto_mod = self.modality_var.get() == AUTO_MODALITY
+        forced_mod = si.modality      # resolved code when not in Auto mode
         job_dir = paths.jobs_dir() / (f"job_{study.accession or 'x'}_"
                                       f"{time.strftime('%Y%m%d_%H%M%S')}")
 
@@ -801,12 +865,35 @@ class App(*_APP_BASES):
 
         def work():
             datasets = []
+            snum = si.series_number
             if pages:
-                datasets.extend(sc_import.convert_pages(pages, study, si))
+                if auto_mod:
+                    # Split by per-file-type modality: one new series per code.
+                    groups = sc_import.group_pages_by_modality(pages)
+                    for mod, grp in groups.items():
+                        gi = replace(si, modality=mod, series_number=snum)
+                        snum += 1
+                        datasets.extend(sc_import.convert_pages(
+                            grp, study, gi, compression=comp))
+                else:
+                    fi = replace(si, series_number=snum)
+                    snum += 1
+                    datasets.extend(sc_import.convert_pages(
+                        pages, study, fi, compression=comp))
             for vpath, _meta, _thumb in videos:
                 prog(f"Transcoding video {os.path.basename(str(vpath))}…")
-                # each video becomes its own new series
-                datasets.append(video.convert_video(vpath, study, si))
+                # each video becomes its own new series (XC by default)
+                vmod = "XC" if auto_mod else forced_mod
+                vi = replace(si, modality=vmod, series_number=snum)
+                snum += 1
+                datasets.append(video.convert_video(vpath, study, vi))
+            if dicoms:
+                prog(f"Re-filing {len(dicoms)} DICOM object(s)…")
+                # all dropped DICOM objects become one new series (keep modality)
+                di = replace(si, series_number=snum)
+                snum += 1
+                datasets.extend(dicom_import.convert_dicoms(
+                    dicoms, study, di, strip_private=strip_private))
             return send.send_series(my_ae, node, datasets, job_dir,
                                     progress=prog, on_frac=frac,
                                     cleanup=not keep)
@@ -841,6 +928,7 @@ class App(*_APP_BASES):
     def _reset_after_send(self):
         self.pages = []
         self.videos = []
+        self.dicoms = []
         self._refresh_thumbs()
         self.studies = []
         self.chosen_study = None
@@ -853,6 +941,11 @@ class App(*_APP_BASES):
         self._show_step(1)
 
     # ------------------------------------------------------------------- misc
+    def _enable_window_drop(self):
+        """Make the entire window a drop zone (not just the Step 1 banner)."""
+        if self._dnd_ok:
+            self._enable_drop(self, self._on_drop)
+
     def _enable_drop(self, widget, on_paths):
         try:
             widget.drop_target_register(DND_FILES)

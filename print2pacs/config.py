@@ -22,11 +22,13 @@ class Settings:
     appearance: str = "System"          # System / Light / Dark
     pdf_dpi: int = 200
     keep_sent_copy: bool = False        # debug: keep the .dcm files we send
+    image_compression: str = "none"     # none | rle  (RLE Lossless)
+    strip_private_tags: bool = False    # drop private/vendor tags from imported DICOM
     # Remembered destinations by Node.name (query source + send target may differ).
     query_destination: str = ""
     send_destination: str = ""
     # Defaults pre-filled into the series step (editable per job).
-    default_modality: str = "OT"
+    default_modality: str = "Auto (by type)"   # or OT/SC/XC/... to force one
     default_series_description: str = "Print2PACS Import"
     default_conversion_type: str = "WSD"
     default_series_number: int = 9901

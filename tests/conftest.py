@@ -73,6 +73,9 @@ def pacs():
         ae.add_supported_context(cx.abstract_syntax, cx.transfer_syntax)
     # Accept encapsulated H.264 video too.
     ae.add_supported_context(VIDEO_SOP_CLASS_UID, H264_TRANSFER_SYNTAX)
+    # Accept RLE-compressed Secondary Capture.
+    from pydicom.uid import RLELossless
+    ae.add_supported_context("1.2.840.10008.5.1.4.1.1.7", RLELossless)
     ae.add_supported_context(StudyRootQueryRetrieveInformationModelFind)
     ae.add_supported_context(Verification)
     server = ae.start_server(

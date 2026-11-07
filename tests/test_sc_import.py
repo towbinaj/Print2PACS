@@ -136,6 +136,17 @@ def test_save_and_reread(tmp_path):
     assert re.pixel_array.shape == (10, 20, 3)
 
 
+def test_rle_compression_lossless():
+    from pydicom.uid import RLELossless
+    img = Image.new("RGB", (64, 48), (200, 10, 10))
+    ds = sc_import.build_sc_dataset(img, CTX, SI, series_uid="1",
+                                    instance_number=1, compression="rle")
+    assert ds.file_meta.TransferSyntaxUID == RLELossless
+    arr = ds.pixel_array                      # needs RLE decode
+    assert arr.shape == (48, 64, 3)
+    assert tuple(int(x) for x in arr[0, 0]) == (200, 10, 10)   # lossless
+
+
 def test_pixeldata_vr_is_ob_for_8bit():
     # 8-bit uncompressed pixel data must be OB (not OW) or strict archives reject.
     rgb = sc_import.build_sc_dataset(Image.new("RGB", (8, 8), (1, 2, 3)), CTX,
@@ -161,6 +172,33 @@ def test_unicode_emoji_name_roundtrips(tmp_path):
     re = dcmread(str(files[0]))
     assert str(re.PatientName) == "TEST^\U0001F600é"
     assert re.SpecificCharacterSet == "ISO_IR 192"
+
+
+def test_suggest_modality_by_type():
+    assert sc_import.suggest_modality("report.pdf") == "OT"
+    assert sc_import.suggest_modality("scan.TIFF") == "OT"
+    assert sc_import.suggest_modality("x.tif") == "OT"
+    assert sc_import.suggest_modality("photo.jpg") == "XC"
+    assert sc_import.suggest_modality("photo.JPEG") == "XC"
+    assert sc_import.suggest_modality("shot.png") == "XC"
+    assert sc_import.suggest_modality("pic.bmp") == "XC"
+    assert sc_import.suggest_modality("mystery.xyz") == "OT"   # fallback
+
+
+def test_auto_split_groups_and_applies_modality():
+    from dataclasses import replace
+    pages = [_page("RGB", (8, 8), (1, 1, 1)),           # RGB.png -> XC
+             sc_import.SourcePage(Image.new("RGB", (8, 8), (2, 2, 2)), "doc.pdf"),
+             sc_import.SourcePage(Image.new("RGB", (8, 8), (3, 3, 3)), "a.jpg")]
+    groups = sc_import.group_pages_by_modality(pages)
+    assert set(groups) == {"XC", "OT"}
+    assert len(groups["XC"]) == 2 and len(groups["OT"]) == 1
+
+    ot = sc_import.convert_pages(groups["OT"], CTX, replace(SI, modality="OT"))
+    xc = sc_import.convert_pages(groups["XC"], CTX, replace(SI, modality="XC"))
+    assert ot[0].Modality == "OT"
+    assert xc[0].Modality == "XC"
+    assert ot[0].SeriesInstanceUID != xc[0].SeriesInstanceUID   # separate series
 
 
 def test_multiframe_tiff(tmp_path):

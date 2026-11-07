@@ -4,11 +4,12 @@ Send printed, scanned, or exported images to a DICOM PACS as a new series on an
 **existing study** — a modern, license-free rebuild of the old *DCMPrint2PACS*
 tool, without the virtual printer driver.
 
-Instead of printing to a virtual driver, you **drag images, a PDF, or a video
-into the app**, look up the study by **accession number**, and Print2PACS
-converts them to DICOM (**Secondary Capture** for images, **Video Photographic
-Image Storage / H.264** for video), stamps them with the study's patient/study
-metadata, and stores them to PACS as a new series.
+Instead of printing to a virtual driver, you **drag images, a PDF, a video, or an
+existing DICOM object into the app**, look up the study by **accession number**,
+and Print2PACS converts them to DICOM (**Secondary Capture** for images, **Video
+Photographic Image Storage / H.264** for video) — or, for a dropped DICOM object,
+**re-files it as-is** — stamps everything with the study's patient/study metadata,
+and stores it to PACS as a new series.
 
 > **Audience:** this is the *standalone, end-user* app (simple 3-step wizard).
 > The same engine is designed to drop into the
@@ -17,16 +18,23 @@ metadata, and stores them to PACS as a new series.
 
 ## How it works
 
-1. **Select items** — drag in or browse for images `JPG · PNG · TIFF · BMP · PDF`
-   or video `MP4 · MOV · AVI · MKV` (and more). Multi-page TIFF/PDF expand to one
-   image per page; each video becomes its own series. Reorder or remove items.
+1. **Select items** — drag in or browse for images `JPG · PNG · TIFF · BMP · PDF`,
+   video `MP4 · MOV · AVI · MKV`, or existing **DICOM objects** `.dcm` (detected by
+   content, so any extension works). Multi-page TIFF/PDF expand to one image per
+   page; each video becomes its own series; dropped DICOM objects re-file as one
+   new series keeping their native modality. Reorder or remove items.
    (Image color is preserved, incl. palette/CMYK/transparency; grayscale stays
    grayscale; 16-bit grayscale is windowed to 8-bit for display.)
 2. **Find the study** — pick your PACS, enter the **Accession #** (or Patient ID),
    and look it up (C-FIND). Confirm the returned patient/study.
 3. **Review and send** — set the new series details (modality, description, body
    part, capture type) and **Send to PACS** (C-STORE). The images become a new
-   Secondary Capture series under the original accession.
+   Secondary Capture series under the original accession. **Modality defaults to
+   "Auto (by type)"**: PDF/TIFF → `OT`, photos (JPG/PNG/BMP) → `XC`, video →
+   `XC`; a dropped DICOM object keeps its own. A mixed drop files as one series
+   per modality. Pick a specific code to force one instead.
+
+You can **drop files anywhere in the window**, not just on the Step 1 banner.
 
 ## Running from source
 
@@ -90,6 +98,30 @@ GPL build of ffmpeg; distribute accordingly.
 > site's real AE titles, hosts, and ports. The repo ships only placeholders
 > (RFC 5737 doc IPs, `TESTPACS`).
 
+## Importing existing DICOM objects
+
+Drop a `.dcm` (or any DICOM file — it's detected by content, not extension) and
+Print2PACS **re-files it onto the chosen study** instead of rasterizing it: the
+object keeps its native pixels, **Modality** and SOP Class, while its
+patient/study tags are re-stamped to match the looked-up study and it is given a
+fresh Series + SOP Instance UID so it lands as a new series without colliding
+with the original. Several dropped objects become one new series.
+
+**Safe handling (no embedded entrypoint).** Non-DICOM inputs are already safe —
+images/PDF are rasterized to pixels and video is re-encoded, so nothing in the
+original container survives. For DICOM objects the extra care is:
+
+- Every object is **parsed and rebuilt by pydicom** — the bytes sent to PACS are
+  regenerated, never the dropped file verbatim.
+- The unused 128-byte **file preamble is zeroed**, which neutralizes the known
+  *DICOM-as-PE* polyglot ([CVE-2019-11687](https://nvd.nist.gov/vuln/detail/CVE-2019-11687)):
+  a file crafted to be both a valid `.dcm` and a runnable Windows `.exe`. The
+  re-filed object cannot double as a launchable binary.
+- The object is validated as a real DICOM instance (SOP Class + transfer syntax)
+  before anything is sent.
+- **Private/vendor tags are kept by default**; turn on *Settings → Imported
+  DICOM → Strip private/vendor tags* to drop opaque vendor blobs before sending.
+
 ## Building a single .exe
 
 ```
@@ -144,6 +176,7 @@ print2pacs/
   net/      scu.py         (c_echo / c_find / c_store - DCMTools-compatible)
   engine/   sc_import.py   (images/PDF -> Secondary Capture DICOM)  <- new core
             video.py       (video -> H.264 Video Photographic DICOM)
+            dicom_import.py(re-file an existing DICOM object onto the study)
             ffmpeg_tools.py(locate/run bundled or system ffmpeg)
             reconcile.py   (C-FIND study lookup -> StudyContext)
             send.py        (write + C-STORE a converted series)
@@ -167,5 +200,7 @@ with minimal rework.
   (`1.2.840.10008.1.2.4.102`) — some archives reject video; verify with yours.
 - Only formats that map to a valid DICOM object are accepted; GIF and other
   unsupported types are ignored.
+- A dropped DICOM object is re-filed with its **original Modality / SOP Class**
+  preserved (the Step 3 modality menu applies to converted images/video only).
 - Burned-in PHI in the source is **not** removed; review items before sending.
 - Final validation against a production PACS must be done on your own network.
