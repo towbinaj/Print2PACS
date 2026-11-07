@@ -1,0 +1,9 @@
+# Code owners for Print2PACS.
+#
+# Listed owners are requested for review on any matching change. This only
+# *enforces* review when branch protection on `main` has "Require review from
+# Code Owners" enabled (Settings -> Branches). Without that, it just auto-requests
+# the owner as a reviewer on pull requests.
+
+# Everything in the repository.
+* @towbinaj
