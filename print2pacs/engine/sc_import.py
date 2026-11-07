@@ -108,7 +108,7 @@ def _load_raster_pages(path: Path) -> list[SourcePage]:
 
 
 def _load_pdf_pages(path: Path, dpi: int) -> list[SourcePage]:
-    import fitz  # PyMuPDF
+    import pymupdf as fitz  # PyMuPDF (the `fitz` import name is deprecated)
     pages: list[SourcePage] = []
     doc = fitz.open(str(path))
     try:
