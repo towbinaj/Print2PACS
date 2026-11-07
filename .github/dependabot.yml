@@ -14,6 +14,13 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    # Keep pymupdf on the 1.26.x line: 2.x pulls in onnxruntime/networkx and
+    # bloats the exe. Scoped to MAJOR version-updates only, so Dependabot
+    # SECURITY updates for pymupdf are still created (update-types affects
+    # version updates only, never the security path).
+    ignore:
+      - dependency-name: "pymupdf"
+        update-types: ["version-update:semver-major"]
     groups:
       python:
         patterns:
