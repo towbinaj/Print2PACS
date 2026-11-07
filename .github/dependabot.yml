@@ -1,0 +1,33 @@
+# Dependabot version updates (low-noise): monthly, grouped into one PR per
+# ecosystem. Security alerts/updates are configured separately in repo Settings
+# and are not affected by this file. Dependabot opens PRs (never direct pushes),
+# and these commit-message prefixes keep "[release]" out of subjects so a merge
+# never triggers the release build.
+version: 2
+updates:
+  # Python deps (requirements.txt + requirements-dev.txt). Exact pins here are
+  # intentional (e.g. pymupdf), so review each grouped PR before merging.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    groups:
+      python:
+        patterns:
+          - "*"
+
+  # GitHub Actions used by the release workflow (checkout, setup-python, etc.).
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions:
+        patterns:
+          - "*"
