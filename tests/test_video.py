@@ -25,6 +25,18 @@ META = video.VideoMeta(width=640, height=480, fps=30.0, nframes=90, duration=3.0
 FAKE_STREAM = b"\x00\x00\x00\x01" + b"fakeh264" * 50   # pretend elementary stream
 
 
+def test_ffmpeg_no_path_fallback_when_frozen(monkeypatch, tmp_path):
+    # R22: the built exe must not run a PATH-resolved ffmpeg; from source it may.
+    from print2pacs import paths
+    monkeypatch.setattr(paths, "resource_dir", lambda: tmp_path)   # no bundled
+    monkeypatch.setattr(ffmpeg_tools.shutil, "which",
+                        lambda name: "C:/planted/ffmpeg.exe")
+    monkeypatch.setattr(ffmpeg_tools.sys, "frozen", True, raising=False)
+    assert ffmpeg_tools.ffmpeg_path() is None
+    monkeypatch.setattr(ffmpeg_tools.sys, "frozen", False, raising=False)
+    assert ffmpeg_tools.ffmpeg_path() == "C:/planted/ffmpeg.exe"
+
+
 def test_is_video():
     assert video.is_video("clip.mp4")
     assert video.is_video("a.AVI")

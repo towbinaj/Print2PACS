@@ -109,16 +109,34 @@ def test_cmyk_to_rgb():
     assert ds.SamplesPerPixel == 3
 
 
-def test_16bit_windowed_to_8bit():
+def test_16bit_grayscale_preserved():
+    # R15: high-bit grayscale is preserved as 16-bit (no precision loss), with a
+    # VOI window so it still displays.
     import numpy as np
     ramp = np.tile(np.linspace(0, 65535, 50, dtype=np.uint16), (10, 1))
     img = Image.fromarray(ramp)           # mode I;16
     ds = sc_import.build_sc_dataset(img, CTX, SI, series_uid="9",
                                     instance_number=1)
     assert ds.PhotometricInterpretation == "MONOCHROME2"
-    assert ds.BitsAllocated == 8
+    assert ds.BitsAllocated == 16 and ds.BitsStored == 16 and ds.HighBit == 15
+    assert ds["PixelData"].VR == "OW"
+    assert "WindowCenter" in ds and "WindowWidth" in ds
     arr = ds.pixel_array
-    assert arr.min() == 0 and arr.max() == 255     # full window visible
+    assert arr.dtype == np.uint16
+    assert int(arr.max()) == 65535 and int(arr.min()) == 0   # values preserved
+
+
+def test_exif_orientation_applied(tmp_path):
+    # R15: a photo tagged "rotate 90°" (EXIF orientation 6) is stored upright.
+    from PIL import Image as PILImage
+    img = PILImage.new("RGB", (40, 20), (10, 20, 30))   # 40 wide x 20 tall
+    exif = img.getexif()
+    exif[0x0112] = 6                                      # Orientation = rotate 90 CW
+    p = tmp_path / "photo.jpg"
+    img.save(p, exif=exif)
+    pages = sc_import.load_pages(p)
+    # exif_transpose swaps W/H for a 90° rotation -> 20 wide x 40 tall
+    assert pages[0].image.size == (20, 40)
 
 
 def test_gif_not_supported():

@@ -23,10 +23,19 @@ class FFmpegNotFound(Exception):
 
 
 def ffmpeg_path() -> str | None:
-    """Return the ffmpeg executable path: bundled first, then PATH."""
+    """Return the ffmpeg executable path.
+
+    The bundled binary is always preferred. In the built (frozen) exe we never
+    fall back to a PATH-resolved ffmpeg: a managed install ships its own verified
+    binary, and running whatever ``ffmpeg`` happens to be on PATH would let a
+    planted executable run with the user's rights (R22). From source, PATH
+    fallback stays for developer convenience.
+    """
     bundled = paths.resource_dir() / "assets" / "ffmpeg" / _EXE
     if bundled.exists():
         return str(bundled)
+    if getattr(sys, "frozen", False):
+        return None
     return shutil.which("ffmpeg")
 
 

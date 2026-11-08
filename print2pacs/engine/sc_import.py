@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
-from PIL import Image
+from PIL import Image, ImageOps
 from pydicom.dataset import FileDataset, FileMetaDataset
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
@@ -102,7 +102,9 @@ def _load_raster_pages(path: Path) -> list[SourcePage]:
                 im.seek(i)
             frame = im.convert(im.mode)  # detach a copy from the file handle
             frame.load()
-            pages.append(SourcePage(image=frame.copy(), source=path.name,
+            # Apply EXIF orientation so camera/phone photos are stored upright.
+            frame = ImageOps.exif_transpose(frame)
+            pages.append(SourcePage(image=frame, source=path.name,
                                     page_index=i))
     return pages
 
@@ -141,47 +143,52 @@ def _flatten_rgba(img: Image.Image) -> Image.Image:
     return bg
 
 
-def _scale_to_8bit(img: Image.Image) -> Image.Image:
-    """Map a >8-bit (or float) single-channel image to 8-bit grayscale by
-    min/max window, so the detail is actually visible."""
+def _to_16bit(img: Image.Image) -> Image.Image:
+    """Return a 16-bit (little-endian) MONOCHROME2 image, preserving values.
+
+    Integer high-bit images keep their original sample values; float images are
+    linearly mapped into the 16-bit range (relative values preserved; the result
+    is not a physically calibrated measurement)."""
     import numpy as np
-    arr = np.asarray(img).astype("float64")
-    mn, mx = float(arr.min()), float(arr.max())
-    arr = (arr - mn) / (mx - mn) * 255.0 if mx > mn else np.zeros_like(arr)
-    return Image.fromarray(arr.astype("uint8"))
+    arr = np.asarray(img)
+    if arr.dtype.kind == "f":
+        mn, mx = float(np.nanmin(arr)), float(np.nanmax(arr))
+        arr = ((arr - mn) / (mx - mn) * 65535.0) if mx > mn else np.zeros_like(arr)
+    arr = np.clip(arr, 0, 65535).astype("<u2")
+    return Image.fromarray(arr)        # PIL mode 'I;16' (little-endian)
 
 
-def _normalize(img: Image.Image) -> tuple[Image.Image, str, int]:
-    """Return (image, PhotometricInterpretation, SamplesPerPixel) as 8-bit.
+def _normalize(img: Image.Image) -> tuple[Image.Image, str, int, int]:
+    """Return (image, PhotometricInterpretation, SamplesPerPixel, BitsAllocated).
 
     Color is preserved for color sources (incl. palette/CMYK/transparency);
-    grayscale/bilevel stay MONOCHROME2; high-bit grayscale is windowed to 8-bit.
-    """
+    grayscale/bilevel stay 8-bit MONOCHROME2; high-bit grayscale is preserved as
+    16-bit MONOCHROME2 (no precision loss)."""
     mode = img.mode
     if mode == "RGB":
-        return img, "RGB", 3
+        return img, "RGB", 3, 8
     if mode == "L":
-        return img, "MONOCHROME2", 1
+        return img, "MONOCHROME2", 1, 8
     if mode == "1":
-        return img.convert("L"), "MONOCHROME2", 1
+        return img.convert("L"), "MONOCHROME2", 1, 8
     if mode == "P":
         # Palette may carry color and/or transparency - never flatten to gray.
         if "transparency" in img.info:
-            return _flatten_rgba(img), "RGB", 3
-        return img.convert("RGB"), "RGB", 3
+            return _flatten_rgba(img), "RGB", 3, 8
+        return img.convert("RGB"), "RGB", 3, 8
     if mode == "PA":
-        return _flatten_rgba(img), "RGB", 3
+        return _flatten_rgba(img), "RGB", 3, 8
     if mode == "LA":
         la = img.convert("LA")
         bg = Image.new("L", la.size, 255)
         bg.paste(la.convert("L"), mask=la.split()[-1])
-        return bg, "MONOCHROME2", 1
+        return bg, "MONOCHROME2", 1, 8
     if mode == "RGBA":
-        return _flatten_rgba(img), "RGB", 3
+        return _flatten_rgba(img), "RGB", 3, 8
     if mode in ("I", "I;16", "I;16B", "I;16L", "F"):
-        return _scale_to_8bit(img), "MONOCHROME2", 1
+        return _to_16bit(img), "MONOCHROME2", 1, 16
     # CMYK, YCbCr, other color spaces -> RGB
-    return img.convert("RGB"), "RGB", 3
+    return img.convert("RGB"), "RGB", 3, 8
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +218,7 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     da = when.strftime("%Y%m%d")
     tm = when.strftime("%H%M%S")
 
-    norm, photometric, spp = _normalize(image)
+    norm, photometric, spp, bits = _normalize(image)
     cols, rows = norm.size
     pixel_bytes = norm.tobytes()
 
@@ -276,16 +283,26 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     ds.PhotometricInterpretation = photometric
     ds.Rows = rows
     ds.Columns = cols
-    ds.BitsAllocated = 8
-    ds.BitsStored = 8
-    ds.HighBit = 7
+    ds.BitsAllocated = bits
+    ds.BitsStored = bits
+    ds.HighBit = bits - 1
     ds.PixelRepresentation = 0
     if spp == 3:
         ds.PlanarConfiguration = 0
     ds.PixelData = pixel_bytes
-    # 8-bit uncompressed pixel data must be VR OB (pydicom defaults to OW, which
-    # strict archives such as Merge VNA reject for BitsAllocated=8).
-    ds["PixelData"].VR = "OB"
+    if bits == 8:
+        # 8-bit uncompressed pixel data must be VR OB (pydicom defaults to OW,
+        # which strict archives such as Merge VNA reject for BitsAllocated=8).
+        ds["PixelData"].VR = "OB"
+    else:
+        # 16-bit grayscale: VR OW, plus a VOI window so it renders correctly
+        # (not near-black) in viewers that need one.
+        ds["PixelData"].VR = "OW"
+        import numpy as np
+        a = np.frombuffer(pixel_bytes, dtype="<u2")
+        lo, hi = int(a.min()), int(a.max())
+        ds.WindowCenter = str((lo + hi) // 2)
+        ds.WindowWidth = str(max(1, hi - lo))
 
     # SOP Common must be set before we (optionally) re-encode the pixels.
     ds.SOPClassUID = SC_SOP_CLASS_UID

@@ -24,7 +24,8 @@ and stores it to PACS as a new series.
    page; each video becomes its own series; dropped DICOM objects re-file as one
    new series keeping their native modality. Reorder or remove items.
    (Image color is preserved, incl. palette/CMYK/transparency; grayscale stays
-   grayscale; 16-bit grayscale is windowed to 8-bit for display.)
+   grayscale; 16-bit grayscale is preserved as 16-bit with a display window;
+   camera photos are auto-rotated via their EXIF orientation.)
 2. **Find the study** — pick your PACS, enter the **Accession #** (or Patient ID),
    and look it up (C-FIND). Confirm the returned patient/study.
 3. **Review and send** — set the new series details (modality, description, body
