@@ -72,3 +72,28 @@ CI (`.github/workflows/release.yml`) stamps the version into
 `print2pacs/__init__.py`, runs the tests, builds the exe (bundling ffmpeg),
 SHA-256s it, and publishes a GitHub Release. **A commit without the marker builds
 nothing** — only add the marker to a commit you actually want shipped.
+
+## Deferred / infrastructure-dependent
+
+Some hardening is intentionally **not** implemented in this desktop client because
+it only works with hospital-managed infrastructure. These are noted at their
+point of use in code; the authoritative status/traceability lives outside this
+public repo.
+
+- **Durable-storage confirmation (DICOM Storage Commitment)** — not in the client;
+  the commitment result is usually async on a separate association and belongs in
+  an authenticated intake gateway. The send journal records per-object C-STORE
+  acceptance. (See `engine/spool.py`.)
+- **Attributable clinical audit** — not written on the desktop (a PHI-bearing
+  audit file is data-at-rest risk with little benefit). Attribution belongs in a
+  central audit repository (ATNA/syslog) emitted by managed infra. (See
+  `engine/spool.py`.)
+- **Exe code-signing** — the published exe is unsigned; Authenticode signing needs
+  a certificate and a managed build pipeline. (See `Print2PACS.spec`.)
+- **Verified FFmpeg provenance** — the build pins an immutable dated BtbN build +
+  SHA-256; a durable setup would mirror that artifact in controlled storage. (See
+  `scripts/fetch_ffmpeg.py`.)
+- **Authenticated imaging intake gateway + global rate/association limits** — a
+  hospital infrastructure control, not application code.
+- **Licensing** — GPL-3.0 (`LICENSE`); redistribution of the PyMuPDF (AGPL) and
+  bundled FFmpeg (GPL) combination needs counsel review (README "License").

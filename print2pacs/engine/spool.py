@@ -180,6 +180,17 @@ def send_job(job_dir: Path, my_aetitle: str, node: Node, *, tls_args=None,
     journal["last_attempt"] = _now()
     _write(job_dir, journal)
 
+    # NOTE: C-STORE acceptance recorded above is not proof of durable archival.
+    # DICOM Storage Commitment is intentionally not implemented in this client:
+    # a reliable commitment result usually arrives asynchronously on a separate
+    # association and so belongs in an authenticated intake gateway rather than a
+    # desktop tool. The per-object journal states are the available evidence.
+    #
+    # Likewise, an attributable clinical audit trail (operator, destination,
+    # patient/study, per-object outcome) is intentionally NOT written here: a
+    # PHI-bearing audit log on the desktop is data-at-rest risk with little
+    # benefit. Attribution belongs in a central audit repository (e.g. ATNA /
+    # syslog) emitted by managed infrastructure, which this build does not have.
     c = counts(journal)
     resolved = is_resolved(journal)
     discarded = False

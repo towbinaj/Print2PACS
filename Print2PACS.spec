@@ -31,6 +31,11 @@ a = Analysis(
 )
 pyz = PYZ(a.pure)
 
+# NOTE: the resulting exe is NOT Authenticode code-signed. Signing needs a
+# code-signing certificate and belongs in a managed/hospital build pipeline
+# (sign dist/Print2PACS.exe after this step, before publishing). Unsigned builds
+# trip SmartScreen/EDR and can't be verified as publisher-authentic. Deferred:
+# infrastructure item, not a code change here.
 exe = EXE(
     pyz,
     a.scripts,

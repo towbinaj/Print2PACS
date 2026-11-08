@@ -194,8 +194,9 @@ with minimal rework.
 
 ## Notes & limitations
 
-- Image output is 8-bit Secondary Capture (`MONOCHROME2` or `RGB`), uncompressed
-  (Explicit VR Little Endian) — maximally compatible with PACS/VNAs.
+- Image output is Secondary Capture, uncompressed Explicit VR Little Endian —
+  8-bit `MONOCHROME2`/`RGB` for most sources, 16-bit `MONOCHROME2` for high-bit
+  grayscale. Maximally compatible with PACS/VNAs.
 - Video output is encapsulated H.264 (High/4.1). **Audio is dropped.** The
   receiving PACS/VNA must negotiate the H.264 presentation context
   (`1.2.840.10008.1.2.4.102`) — some archives reject video; verify with yours.
@@ -204,6 +205,11 @@ with minimal rework.
 - A dropped DICOM object is re-filed with its **original Modality / SOP Class**
   preserved (the Step 3 modality menu applies to converted images/video only).
 - Burned-in PHI in the source is **not** removed; review items before sending.
+- The published `Print2PACS.exe` is **not code-signed**; Windows SmartScreen may
+  warn on first run. A managed/hospital build should be signed before distribution.
+- Print2PACS is a conversion/transfer utility, **not a certified medical device**.
+  Validate behavior on your own systems and follow your institution's approval
+  process before any clinical use.
 - Final validation against a production PACS must be done on your own network.
 
 ## License
