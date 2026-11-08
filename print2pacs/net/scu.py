@@ -74,6 +74,7 @@ class FindResult:
     datasets: list[Dataset] = field(default_factory=list)
     message: str = ""
     success: bool = False
+    truncated: bool = False      # stopped early at max_results (too many matches)
 
 
 @dataclass
@@ -158,7 +159,8 @@ def build_query(level: str, **criteria: str) -> Dataset:
 
 def c_find(my_aetitle: str, node: Node, identifier: Dataset,
            model: str = "STUDY", timeout: int | None = None,
-           progress: Progress = _noop, tls_args=None) -> FindResult:
+           progress: Progress = _noop, tls_args=None,
+           max_results: int | None = None) -> FindResult:
     timeout = timeout or max(node.timeout, 60)
     result = FindResult()
     find_model = _FIND_MODELS[model.upper()]
@@ -177,11 +179,20 @@ def c_find(my_aetitle: str, node: Node, identifier: Dataset,
         for status, ds in assoc.send_c_find(identifier, find_model):
             if status and status.Status in (0xFF00, 0xFF01) and ds:
                 result.datasets.append(ds)
+                if max_results and len(result.datasets) >= max_results:
+                    result.truncated = True     # too many; stop reading
+                    break
             elif status and status.Status == 0x0000:
                 result.success = True
             elif status:
-                progress(f"C-FIND status 0x{status.Status:04x}")
-        result.message = f"{len(result.datasets)} match(es)."
+                # A non-pending, non-success status is a failure/abort. Record
+                # it so the caller can refuse to trust a partial result set.
+                result.message = f"C-FIND failed with status 0x{status.Status:04x}."
+                progress(result.message)
+        if result.truncated:
+            result.message = f"More than {max_results} matches."
+        elif not result.message:
+            result.message = f"{len(result.datasets)} match(es)."
     finally:
         assoc.release()
     return result

@@ -44,3 +44,68 @@ def test_lookup_against_fake_pacs(pacs):
     assert c.accession == "ACC777"       # echoed by the fake PACS
     assert c.patient_name == "DOE^JANE^A"
     assert c.is_resolved
+
+
+# --------------------------------------------------------- query safety guards
+def _find_server(handler):
+    import socket
+
+    from pynetdicom import AE, evt
+    from pynetdicom.sop_class import StudyRootQueryRetrieveInformationModelFind
+
+    from print2pacs.model import Node
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    ae = AE(ae_title="FSCP")
+    ae.add_supported_context(StudyRootQueryRetrieveInformationModelFind)
+    srv = ae.start_server(("127.0.0.1", port), block=False,
+                          evt_handlers=[(evt.EVT_C_FIND, handler)])
+    return srv, Node(name="f", aetitle="FSCP", host="127.0.0.1", port=port)
+
+
+def _match(acc, uid):
+    ds = Dataset()
+    ds.QueryRetrieveLevel = "STUDY"
+    ds.StudyInstanceUID = uid
+    ds.AccessionNumber = acc
+    ds.PatientID = "P"
+    ds.PatientName = "DOE^JANE"
+    return ds
+
+
+def test_wildcard_only_query_is_rejected():
+    from print2pacs.model import Node
+    node = Node(name="x", aetitle="A", host="127.0.0.1", port=1)
+    for acc, pid in (("*", ""), ("?*", ""), ("", "**")):
+        with pytest.raises(reconcile.ReconcileError):
+            reconcile.lookup_studies("ME", node, accession=acc, patient_id=pid)
+
+
+def test_partial_failure_result_is_rejected():
+    def handler(event):
+        yield 0xFF00, _match("ACC1", "1.2.3.4")   # a partial match ...
+        yield 0xA700, None                         # ... then a failure status
+
+    srv, node = _find_server(handler)
+    try:
+        with pytest.raises(reconcile.ReconcileError):
+            reconcile.lookup_studies("ME", node, accession="ACC1")
+    finally:
+        srv.shutdown()
+
+
+def test_too_many_matches_is_rejected():
+    def handler(event):
+        for i in range(120):
+            yield 0xFF00, _match(f"A{i}", f"1.2.3.{i}")
+        yield 0x0000, None
+
+    srv, node = _find_server(handler)
+    try:
+        with pytest.raises(reconcile.ReconcileError):
+            reconcile.lookup_studies("ME", node, patient_id="P", max_results=100)
+    finally:
+        srv.shutdown()
