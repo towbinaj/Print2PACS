@@ -23,6 +23,12 @@ OldVersion/
 # External assessment package (kept locally as reference only, not shipped)
 assessment/
 
+# Local-only response to the external assessment (shareable, never committed)
+ASSESSMENT_RESPONSE.md
+
+# Local-only updated remediation plan (shareable, never committed)
+REMEDIATION_PLAN_UPDATED.md
+
 # Foreign / site config that happens to live in this folder (never commit)
 DCMsettings.json
 
