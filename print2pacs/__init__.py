@@ -12,4 +12,4 @@ a tab for IT staff.
 from __future__ import annotations
 
 APP_NAME = "Print2PACS"
-__version__ = "1.0.14"
+__version__ = "1.0.15"

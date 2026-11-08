@@ -159,3 +159,14 @@ def test_video_stamps_issuer():
     ctx = replace(CTX, issuer_of_patient_id="HOSP-A")
     ds = video.build_video_dataset(FAKE_STREAM, META, ctx, SI, series_uid="9.9")
     assert ds.IssuerOfPatientID == "HOSP-A"
+
+
+def test_ffmpeg_run_is_contained():
+    """R22: exercises the protocol-whitelist + Job Object run path end-to-end
+    with a trivial, fast ffmpeg invocation."""
+    import pytest
+    if not ffmpeg_tools.have_ffmpeg():
+        pytest.skip("ffmpeg not available")
+    proc = ffmpeg_tools.run(["-version"])
+    assert proc.returncode == 0
+    assert b"ffmpeg" in proc.stdout.lower()
