@@ -83,6 +83,9 @@ class App(*_APP_BASES):
         # Monotonic token so an older, slower C-FIND callback can never replace
         # the results/selection from a newer lookup (stale-result suppression).
         self._lookup_gen = 0
+        # Name of the PACS the current study was looked up on (for the
+        # query->send namespace guard).
+        self._lookup_query_name = ""
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -750,6 +753,7 @@ class App(*_APP_BASES):
             return
         self.settings.query_destination = node.name
         config.save_settings(self.settings)
+        self._lookup_query_name = node.name
         self.find_status.configure(text="Querying PACS…")
         # A new lookup invalidates any prior selection and any in-flight query.
         self.chosen_study = None
@@ -893,8 +897,19 @@ class App(*_APP_BASES):
             return
         if self.dicoms:
             log.info("Operator confirmed %d re-filed DICOM object(s) belong to "
-                     "patient %s / study %s", len(self.dicoms),
-                     self.chosen_study.patient_id, self.chosen_study.study_uid)
+                     "the selected study.", len(self.dicoms))
+
+        # Query->send namespace guard: the found StudyInstanceUID only means the
+        # right thing if the send target shares the query node's namespace.
+        qn = self._lookup_query_name
+        if qn and node.name != qn:
+            if not messagebox.askyesno(
+                    APP_NAME,
+                    f"This study was found on '{qn}', but you are sending to "
+                    f"'{node.name}'.\n\nOnly continue if both systems share the "
+                    "same patient/study namespace (same enterprise). "
+                    "Send anyway?"):
+                return
 
         perr = limits.pages_error(len(self.pages),
                                   self.settings.max_pages_per_job)

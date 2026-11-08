@@ -48,6 +48,10 @@ def test_build_video_dataset_attributes():
     assert ds.Modality == "XC"
     assert ds.ConversionType == "DV"
     assert ds.LossyImageCompressionMethod == "ISO_14496_10"
+    # R14: conformance attributes present
+    assert "AcquisitionContextSequence" in ds
+    assert "PatientOrientation" in ds
+    assert "Laterality" in ds
     # encapsulated, undefined length
     assert ds["PixelData"].is_undefined_length
 

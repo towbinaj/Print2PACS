@@ -194,6 +194,7 @@ def build_video_dataset(stream: bytes, meta: VideoMeta, context: StudyContext,
     ds.SeriesDescription = series_info.series_description or ""
     if series_info.body_part:
         ds.BodyPartExamined = series_info.body_part
+    ds.Laterality = ""                      # 2C: empty (no laterality for a clip)
     ds.SeriesDate = da
     ds.SeriesTime = tm
 
@@ -205,8 +206,12 @@ def build_video_dataset(stream: bytes, meta: VideoMeta, context: StudyContext,
     # Image identification
     ds.InstanceNumber = int(instance_number)
     ds.ImageType = ["DERIVED", "SECONDARY"]
+    ds.PatientOrientation = ""              # 2C: empty (not applicable)
     ds.ContentDate = da
     ds.ContentTime = tm
+
+    # Acquisition Context Module: AcquisitionContextSequence is Type 2 (empty).
+    ds.AcquisitionContextSequence = []
 
     # Image pixel (H.264 -> YBR_PARTIAL_420)
     ds.SamplesPerPixel = 3
@@ -254,7 +259,7 @@ def convert_video(path: str | Path, context: StudyContext,
     if frames:
         meta.nframes = frames
     series_uid = series_uid or generate_uid()
-    log.info("Converted video %s -> %d frames, %dx%d @ %.2f fps (MPEG-TS)",
-             path.name, meta.nframes, meta.width, meta.height, meta.fps)
+    log.info("Converted video -> %d frames, %dx%d @ %.2f fps (MPEG-TS)",
+             meta.nframes, meta.width, meta.height, meta.fps)
     return build_video_dataset(stream, meta, context, series_info,
                                series_uid=series_uid)

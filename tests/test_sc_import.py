@@ -209,3 +209,11 @@ def test_multiframe_tiff(tmp_path):
     assert len(pages) == 3
     assert all(pg.source == "multi.tiff" for pg in pages)
     assert [pg.page_index for pg in pages] == [0, 1, 2]
+
+
+def test_sc_conformance_attributes_present():
+    # R14: required/conditional attributes flagged by IOD validation are present
+    # (empty, since a converted document/photo has no laterality/orientation).
+    ds = sc_import.convert_pages([_page("L", (8, 8), 5)], CTX, SI)[0]
+    assert "Laterality" in ds and ds.Laterality == ""
+    assert "PatientOrientation" in ds

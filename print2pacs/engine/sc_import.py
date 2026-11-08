@@ -251,6 +251,8 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     ds.SeriesDescription = series_info.series_description or ""
     if series_info.body_part:
         ds.BodyPartExamined = series_info.body_part
+    # Laterality (2C): empty - a converted document/photo has no laterality.
+    ds.Laterality = ""
     ds.SeriesDate = da
     ds.SeriesTime = tm
 
@@ -264,6 +266,8 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     # --- General Image Module ---
     ds.InstanceNumber = int(instance_number)
     ds.ImageType = ["DERIVED", "SECONDARY"]
+    # PatientOrientation (2C): empty - not applicable to a converted doc/photo.
+    ds.PatientOrientation = ""
     ds.ContentDate = da
     ds.ContentTime = tm
 
