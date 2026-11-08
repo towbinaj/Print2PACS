@@ -35,6 +35,7 @@ def _s(ds: Dataset, keyword: str) -> str:
 def dataset_to_context(ds: Dataset) -> StudyContext:
     return StudyContext(
         patient_id=_s(ds, "PatientID"),
+        issuer_of_patient_id=_s(ds, "IssuerOfPatientID"),
         patient_name=_s(ds, "PatientName"),
         birth_date=_s(ds, "PatientBirthDate"),
         sex=_s(ds, "PatientSex"),
@@ -51,9 +52,9 @@ def dataset_to_context(ds: Dataset) -> StudyContext:
 
 # Return keys requested from the PACS for each matching study.
 _RETURN_KEYS = (
-    "PatientID", "PatientName", "PatientBirthDate", "PatientSex",
-    "StudyInstanceUID", "StudyDate", "StudyTime", "AccessionNumber",
-    "StudyID", "StudyDescription", "ReferringPhysicianName",
+    "PatientID", "IssuerOfPatientID", "PatientName", "PatientBirthDate",
+    "PatientSex", "StudyInstanceUID", "StudyDate", "StudyTime",
+    "AccessionNumber", "StudyID", "StudyDescription", "ReferringPhysicianName",
     "ModalitiesInStudy",
 )
 

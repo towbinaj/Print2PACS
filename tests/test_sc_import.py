@@ -235,3 +235,11 @@ def test_sc_conformance_attributes_present():
     ds = sc_import.convert_pages([_page("L", (8, 8), 5)], CTX, SI)[0]
     assert "Laterality" in ds and ds.Laterality == ""
     assert "PatientOrientation" in ds
+
+
+def test_sc_stamps_issuer_of_patient_id():
+    from dataclasses import replace
+    ctx = replace(CTX, issuer_of_patient_id="HOSP-A")
+    ds = sc_import.build_sc_dataset(Image.new("L", (4, 4), 0), ctx, SI,
+                                    series_uid="9", instance_number=1)
+    assert ds.IssuerOfPatientID == "HOSP-A"

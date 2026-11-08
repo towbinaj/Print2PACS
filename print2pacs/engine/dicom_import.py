@@ -257,6 +257,10 @@ def restamp(ds: FileDataset, context: StudyContext, series_info: SeriesInfo, *,
     #     and stale links to the original study (top-level + nested). ---
     _scrub_foreign_identity(ds)
 
+    # Stamp the TARGET assigning authority (the scrub removed the original's).
+    if context.issuer_of_patient_id:
+        ds.IssuerOfPatientID = context.issuer_of_patient_id
+
     # --- SOP Common (new identity so it cannot collide with the original) ---
     ds.SOPInstanceUID = new_sop
 

@@ -177,6 +177,8 @@ def build_video_dataset(stream: bytes, meta: VideoMeta, context: StudyContext,
     # Patient + existing study
     ds.PatientName = context.patient_name or ""
     ds.PatientID = context.patient_id or ""
+    if context.issuer_of_patient_id:
+        ds.IssuerOfPatientID = context.issuer_of_patient_id
     ds.PatientBirthDate = context.birth_date or ""
     ds.PatientSex = context.sex or ""
     ds.StudyInstanceUID = context.study_uid

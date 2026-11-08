@@ -152,3 +152,10 @@ def test_full_video_pipeline_integration(pacs, tmp_path):
     assert any(f[:1] == b"\x47" for f in generate_fragments(ds.PixelData))
     result = send.send_series("ME", pacs.node, [ds], tmp_path / "vjob2")
     assert result.sent == 1 and result.failed == 0
+
+
+def test_video_stamps_issuer():
+    from dataclasses import replace
+    ctx = replace(CTX, issuer_of_patient_id="HOSP-A")
+    ds = video.build_video_dataset(FAKE_STREAM, META, ctx, SI, series_uid="9.9")
+    assert ds.IssuerOfPatientID == "HOSP-A"

@@ -222,3 +222,11 @@ def test_refile_pipeline_stores_onto_study(pacs, tmp_path):
     assert got.SOPClassUID == US_SOP                    # modality preserved
     assert got.Modality == "US"
     assert got.SOPInstanceUID != old_sop                # fresh instance identity
+
+
+def test_refile_stamps_target_issuer(tmp_path):
+    from dataclasses import replace
+    p, _ = _make_source(tmp_path / "a.dcm", foreign=True)
+    target = replace(TARGET, issuer_of_patient_id="HOSP-A")
+    [ds] = dicom_import.convert_dicoms([dicom_import.load_dicom(p)], target, SI)
+    assert ds.IssuerOfPatientID == "HOSP-A"        # target issuer stamped

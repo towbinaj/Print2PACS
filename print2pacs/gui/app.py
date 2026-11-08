@@ -6,6 +6,7 @@ Designed for non-IT users: three clear steps, drag-and-drop, and a single
 
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from dataclasses import replace
@@ -24,8 +25,8 @@ except Exception:  # noqa: BLE001
 from .. import APP_NAME, __version__, config, paths
 from ..engine import dicom_import, limits, reconcile, sc_import, spool, video
 from ..logging_setup import get_logger, setup as setup_logging
-from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SeriesInfo,
-                     StudyContext)
+from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SendIntent,
+                     SeriesInfo, StudyContext)
 from ..net import scu
 from . import theme
 from .dialogs import AddDestinationDialog, RecoveryDialog
@@ -86,11 +87,14 @@ class App(*_APP_BASES):
         # Name of the PACS the current study was looked up on (for the
         # query->send namespace guard).
         self._lookup_query_name = ""
+        # Fingerprint the re-file confirmation was bound to (invalidated on change).
+        self._confirmed_fp = ""
 
-        self.grid_rowconfigure(1, weight=1)
+        self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
         self._update_info = None
         self._build_header()
+        self._build_banner()
         self._build_content()
         self._build_nav()
         self._build_statusbar()
@@ -125,10 +129,39 @@ class App(*_APP_BASES):
                       command=self._open_settings).grid(
             row=0, column=2, rowspan=2, sticky="e", padx=(0, 14))
 
+    # ------------------------------------------------- persistent patient banner
+    def _build_banner(self):
+        """A pinned banner showing the selected patient; visible from the moment
+        a study is chosen through review/send, so the target identity is always
+        in view. Display-only."""
+        self.banner_frame = ctk.CTkFrame(self, corner_radius=0,
+                                         fg_color=theme.ACCENT)
+        self.banner_frame.grid(row=1, column=0, sticky="ew")
+        self.banner_frame.grid_columnconfigure(0, weight=1)
+        self.patient_banner = ctk.CTkLabel(
+            self.banner_frame, text="", anchor="w", text_color="white",
+            font=ctk.CTkFont(size=13, weight="bold"))
+        self.patient_banner.grid(row=0, column=0, sticky="w", padx=14, pady=4)
+        self.banner_frame.grid_remove()        # hidden until a study is selected
+
+    def _update_banner(self):
+        s = self.chosen_study
+        if s and s.study_uid:
+            name = s.patient_name.replace("^", ", ")
+            issuer = (f" · issuer {s.issuer_of_patient_id}"
+                      if s.issuer_of_patient_id else " · ⚠ no issuer")
+            self.patient_banner.configure(text=(
+                f"▶ Filing to:  {name}   MRN {s.patient_id}{issuer}   "
+                f"DOB {s.birth_date or '—'}   Sex {s.sex or '—'}   "
+                f"Acc {s.accession or '—'}   {s.study_description or ''}".rstrip()))
+            self.banner_frame.grid()
+        else:
+            self.banner_frame.grid_remove()
+
     # ----------------------------------------------------------------- content
     def _build_content(self):
         self.content = ctk.CTkFrame(self, fg_color="transparent")
-        self.content.grid(row=1, column=0, sticky="nsew", padx=16, pady=8)
+        self.content.grid(row=2, column=0, sticky="nsew", padx=16, pady=8)
         self.content.grid_rowconfigure(0, weight=1)
         self.content.grid_columnconfigure(0, weight=1)
         self.frames: dict[int, ctk.CTkFrame] = {}
@@ -248,6 +281,7 @@ class App(*_APP_BASES):
         self.dicom_confirm_var = ctk.BooleanVar(value=False)
         self.dicom_confirm_chk = ctk.CTkCheckBox(
             self.confirm_box, variable=self.dicom_confirm_var,
+            command=self._on_dicom_confirm,
             text="I confirm this material belongs to this patient")
 
         series = ctk.CTkFrame(f)
@@ -313,7 +347,7 @@ class App(*_APP_BASES):
     # -------------------------------------------------------------------- nav
     def _build_nav(self):
         bar = ctk.CTkFrame(self, corner_radius=0, height=56)
-        bar.grid(row=2, column=0, sticky="ew")
+        bar.grid(row=3, column=0, sticky="ew")
         bar.grid_columnconfigure(0, weight=1)
         self.back_btn = ctk.CTkButton(bar, text="‹ Back", width=90,
                                       fg_color="gray", command=self._back)
@@ -327,7 +361,7 @@ class App(*_APP_BASES):
     # ------------------------------------------------------------- status bar
     def _build_statusbar(self):
         bar = ctk.CTkFrame(self, corner_radius=0, height=26)
-        bar.grid(row=3, column=0, sticky="ew")
+        bar.grid(row=4, column=0, sticky="ew")
         bar.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(bar, text=f"Data: {paths.data_dir()}",
                      text_color=theme.MUTED,
@@ -757,6 +791,7 @@ class App(*_APP_BASES):
         self.find_status.configure(text="Querying PACS…")
         # A new lookup invalidates any prior selection and any in-flight query.
         self.chosen_study = None
+        self._update_banner()
         self._clear_results()
         self._lookup_gen += 1
         gen = self._lookup_gen
@@ -823,6 +858,7 @@ class App(*_APP_BASES):
         idx = self._study_var.get()
         if 0 <= idx < len(self.studies):
             self.chosen_study = self.studies[idx]
+            self._update_banner()
             self.find_status.configure(
                 text="Study selected. Click Next to review and send.")
 
@@ -845,8 +881,10 @@ class App(*_APP_BASES):
         note = ("\nDropped DICOM objects keep their original modality/type; "
                 "patient & study tags are re-stamped to this study."
                 if self.dicoms else "")
+        issuer_txt = (f" · issuer {s.issuer_of_patient_id}"
+                      if s.issuer_of_patient_id else " · ⚠ no MRN issuer returned")
         self.confirm_lbl.configure(text=(
-            f"Patient:  {name}   (ID {s.patient_id})\n"
+            f"Patient:  {name}   (ID {s.patient_id}{issuer_txt})\n"
             f"Study:  Acc {s.accession} · {s.study_description or '—'} · "
             f"{s.study_date or '—'}\n"
             f"To send:  {', '.join(bits) or 'nothing'}{note}"))
@@ -876,6 +914,45 @@ class App(*_APP_BASES):
             conversion_type=conv or "WSD",
         )
 
+    # ---- send intent (identity integrity) -----------------------------------
+    def _content_signature(self) -> str:
+        """A hash of exactly which items are staged, so the intent fingerprint
+        changes if items are added/removed/reordered or swapped."""
+        parts: list[str] = []
+        for p in self.pages:
+            parts.append(f"img:{p.source}#{p.page_index}")
+        for vpath, _m, _t in self.videos:
+            try:
+                st = os.stat(vpath)
+                parts.append(f"vid:{vpath}:{st.st_size}:{int(st.st_mtime)}")
+            except OSError:
+                parts.append(f"vid:{vpath}")
+        for src in self.dicoms:
+            parts.append(f"dcm:{src.content_sha256}")
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
+
+    def _build_intent(self, node) -> SendIntent:
+        import getpass
+        from datetime import datetime
+        try:
+            operator = getpass.getuser()
+        except Exception:  # noqa: BLE001
+            operator = ""
+        return SendIntent.build(
+            self.chosen_study or StudyContext(),
+            query_source=self._lookup_query_name,
+            destination=node.name if node else "",
+            content_signature=self._content_signature(),
+            operator=operator,
+            confirmed_at=datetime.now().isoformat(timespec="seconds"))
+
+    def _on_dicom_confirm(self):
+        # Bind the confirmation to the current intent; a later change to the
+        # study, destination, or items invalidates it (re-checked at send).
+        self._confirmed_fp = (
+            self._build_intent(self._send_node()).identity_fingerprint
+            if self.dicom_confirm_var.get() else "")
+
     def _send(self):
         if self._sending:
             return
@@ -890,10 +967,28 @@ class App(*_APP_BASES):
         if not si.series_description:
             messagebox.showwarning(APP_NAME, "Enter a series description.")
             return
+
+        # Build the immutable send intent and fail closed on bad target identity.
+        intent = self._build_intent(node)
+        problems = intent.validate()
+        if problems:
+            messagebox.showwarning(
+                APP_NAME, "Can't send — the target identity is incomplete:\n\n"
+                + "\n".join(f"• {p}" for p in problems))
+            return
+
         if self.dicoms and not self.dicom_confirm_var.get():
             messagebox.showwarning(
                 APP_NAME, "Please confirm the dropped DICOM objects belong to "
                 "this patient before sending.")
+            return
+        if self.dicoms and self._confirmed_fp != intent.identity_fingerprint:
+            # Study, destination, or items changed after the confirmation.
+            self.dicom_confirm_var.set(False)
+            self._confirmed_fp = ""
+            messagebox.showwarning(
+                APP_NAME, "The study, destination, or items changed since you "
+                "confirmed. Please re-confirm before sending.")
             return
         if self.dicoms:
             log.info("Operator confirmed %d re-filed DICOM object(s) belong to "
@@ -1108,6 +1203,7 @@ class App(*_APP_BASES):
         self._refresh_thumbs()
         self.studies = []
         self.chosen_study = None
+        self._update_banner()
         self._clear_results()
         self.acc_var.set("")
         self.pid_var.set("")

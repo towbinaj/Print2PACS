@@ -109,3 +109,12 @@ def test_too_many_matches_is_rejected():
             reconcile.lookup_studies("ME", node, patient_id="P", max_results=100)
     finally:
         srv.shutdown()
+
+
+def test_dataset_to_context_parses_issuer():
+    ds = Dataset()
+    ds.PatientID = "MRN"
+    ds.IssuerOfPatientID = "HOSP-A"
+    ds.StudyInstanceUID = "1.2.3"
+    ctx = reconcile.dataset_to_context(ds)
+    assert ctx.issuer_of_patient_id == "HOSP-A"

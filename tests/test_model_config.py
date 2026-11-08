@@ -48,3 +48,44 @@ def test_destinations_roundtrip(tmp_path, monkeypatch):
     loaded = config.load_destinations()
     assert [n.name for n in loaded] == ["A", "B"]
     assert loaded[1].port == 11112
+
+
+def test_is_valid_uid():
+    from print2pacs.model import is_valid_uid
+    assert is_valid_uid("1.2.840.113619.2.55.3")
+    assert not is_valid_uid("")
+    assert not is_valid_uid("1.2.x")
+    assert not is_valid_uid("1..2")
+    assert not is_valid_uid("9" * 65)       # too long
+
+
+def test_send_intent_validate_and_fingerprint():
+    from print2pacs.model import SendIntent, StudyContext
+    ctx = StudyContext(study_uid="1.2.3.4", patient_id="MRN1",
+                       issuer_of_patient_id="HOSP-A", patient_name="DOE^J",
+                       accession="ACC1")
+    good = SendIntent.build(ctx, query_source="Q", destination="D",
+                            content_signature="sig")
+    assert good.validate() == []
+    assert good.issuer_of_patient_id == "HOSP-A"
+
+    bad = SendIntent.build(
+        StudyContext(patient_id="", study_uid="nope", patient_name=""),
+        query_source="Q", destination="D", content_signature="s")
+    probs = bad.validate()
+    assert any("Patient ID" in p for p in probs)
+    assert any("Study Instance UID" in p for p in probs)
+    assert any("name" in p for p in probs)
+
+    # Destination or content change -> different fingerprint (invalidates confirm)
+    assert (SendIntent.build(ctx, query_source="Q", destination="D2",
+                             content_signature="sig").identity_fingerprint
+            != good.identity_fingerprint)
+    assert (SendIntent.build(ctx, query_source="Q", destination="D",
+                             content_signature="sig2").identity_fingerprint
+            != good.identity_fingerprint)
+    # operator / timestamp do NOT change the fingerprint
+    assert (SendIntent.build(ctx, query_source="Q", destination="D",
+                             content_signature="sig", operator="x",
+                             confirmed_at="t").identity_fingerprint
+            == good.identity_fingerprint)

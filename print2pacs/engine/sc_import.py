@@ -239,6 +239,8 @@ def build_sc_dataset(image: Image.Image, context: StudyContext,
     # --- Patient Module ---
     ds.PatientName = context.patient_name or ""
     ds.PatientID = context.patient_id or ""
+    if context.issuer_of_patient_id:
+        ds.IssuerOfPatientID = context.issuer_of_patient_id
     ds.PatientBirthDate = context.birth_date or ""
     ds.PatientSex = context.sex or ""
 

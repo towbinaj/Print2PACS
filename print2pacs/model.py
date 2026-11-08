@@ -6,10 +6,20 @@ engine and any future toolkit tab can share destination records.
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
+import re
 from dataclasses import asdict, dataclass, field
 
 AE_TITLE_MAX = 16
+
+# A DICOM UID is dot-separated numeric components, max 64 chars.
+_UID_RE = re.compile(r"^[0-9]+(\.[0-9]+)*$")
+
+
+def is_valid_uid(uid: str) -> bool:
+    uid = (uid or "").strip()
+    return bool(uid) and len(uid) <= 64 and bool(_UID_RE.match(uid))
 
 
 def validate_aetitle(ae: str, *, allow_empty: bool = False) -> str:
@@ -93,6 +103,7 @@ class StudyContext:
     new Secondary Capture series onto an *existing* study."""
 
     patient_id: str = ""
+    issuer_of_patient_id: str = ""   # assigning authority / namespace of the MRN
     patient_name: str = ""
     birth_date: str = ""       # DICOM DA: YYYYMMDD
     sex: str = ""              # M / F / O
@@ -108,6 +119,67 @@ class StudyContext:
     @property
     def is_resolved(self) -> bool:
         return bool(self.study_uid)
+
+
+@dataclass(frozen=True)
+class SendIntent:
+    """An immutable record of exactly what the operator confirmed to send: the
+    target identity, routing, and a signature of the items. The review display
+    and the serialized objects derive from the same intent, and any change to the
+    identity/destination/items changes ``identity_fingerprint`` so a prior
+    confirmation no longer applies.
+    """
+
+    study_uid: str
+    patient_id: str
+    issuer_of_patient_id: str
+    patient_name: str
+    birth_date: str
+    accession: str
+    query_source: str              # node the study was looked up on
+    destination: str               # node the objects will be sent to
+    content_signature: str         # hash summarizing the exact items to send
+    operator: str = ""
+    confirmed_at: str = ""
+
+    @classmethod
+    def build(cls, context: "StudyContext", *, query_source: str, destination: str,
+              content_signature: str, operator: str = "",
+              confirmed_at: str = "") -> "SendIntent":
+        return cls(
+            study_uid=(context.study_uid or "").strip(),
+            patient_id=(context.patient_id or "").strip(),
+            issuer_of_patient_id=(context.issuer_of_patient_id or "").strip(),
+            patient_name=(context.patient_name or "").strip(),
+            birth_date=(context.birth_date or "").strip(),
+            accession=(context.accession or "").strip(),
+            query_source=query_source or "",
+            destination=destination or "",
+            content_signature=content_signature or "",
+            operator=operator or "",
+            confirmed_at=confirmed_at or "",
+        )
+
+    def validate(self) -> list[str]:
+        """Return a list of blocking identity problems (empty = OK)."""
+        problems: list[str] = []
+        if not self.patient_id:
+            problems.append("Patient ID is missing.")
+        if not self.patient_name:
+            problems.append("Patient name is missing.")
+        if not is_valid_uid(self.study_uid):
+            problems.append("Study Instance UID is missing or malformed.")
+        return problems
+
+    @property
+    def identity_fingerprint(self) -> str:
+        """Hash a confirmation is bound to: identity + destination + items.
+
+        Excludes ``operator``/``confirmed_at`` so those don't force a re-confirm.
+        """
+        parts = [self.study_uid, self.patient_id, self.issuer_of_patient_id,
+                 self.accession, self.destination, self.content_signature]
+        return hashlib.sha256("\x1f".join(parts).encode("utf-8")).hexdigest()
 
 
 @dataclass
