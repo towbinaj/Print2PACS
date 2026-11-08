@@ -1004,13 +1004,21 @@ class App(*_APP_BASES):
         # right thing if the send target shares the query node's namespace.
         qn = self._lookup_query_name
         if qn and node.name != qn:
-            if not messagebox.askyesno(
+            allowed = config.pair_allowed(qn, node.name)
+            if allowed is False:                       # policy forbids this pair
+                messagebox.showwarning(
+                    APP_NAME, f"Policy does not permit sending a study queried "
+                    f"from '{qn}' to '{node.name}'. Choose an approved "
+                    "destination.")
+                return
+            if allowed is None and not messagebox.askyesno(
                     APP_NAME,
                     f"This study was found on '{qn}', but you are sending to "
                     f"'{node.name}'.\n\nOnly continue if both systems share the "
                     "same patient/study namespace (same enterprise). "
                     "Send anyway?"):
                 return
+            # allowed is True -> an approved pair; proceed
 
         perr = limits.pages_error(len(self.pages),
                                   self.settings.max_pages_per_job)

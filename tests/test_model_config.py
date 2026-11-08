@@ -89,3 +89,23 @@ def test_send_intent_validate_and_fingerprint():
                              content_signature="sig", operator="x",
                              confirmed_at="t").identity_fingerprint
             == good.identity_fingerprint)
+
+
+def test_destination_policy(tmp_path, monkeypatch):
+    from print2pacs.model import Node
+    pf = tmp_path / "destinations.policy.json"
+    monkeypatch.setattr(config, "policy_path", lambda: pf)
+
+    # No policy file: unmanaged, no approved-pair constraint.
+    assert config.load_destination_policy() is None
+    assert config.destinations_are_managed() is False
+    assert config.pair_allowed("QR", "VNA") is None
+
+    nodes = [Node(name="VNA", aetitle="VNA", host="127.0.0.1", port=104),
+             Node(name="QR", aetitle="QR", host="127.0.0.1", port=105)]
+    config.export_policy(nodes, pf, pairs=[("QR", "VNA")])
+
+    assert config.destinations_are_managed() is True
+    assert {n.name for n in config.load_destinations()} == {"VNA", "QR"}
+    assert config.pair_allowed("QR", "VNA") is True       # approved
+    assert config.pair_allowed("QR", "OTHER") is False    # not approved -> block

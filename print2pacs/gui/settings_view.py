@@ -7,7 +7,7 @@ window refresh its Query/Send pickers.
 
 from __future__ import annotations
 
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 import customtkinter as ctk
 
@@ -237,9 +237,23 @@ class SettingsDialog(ctk.CTkToplevel):
         ctk.CTkLabel(hdr, text="Destinations",
                      font=ctk.CTkFont(size=15, weight="bold")).grid(
             row=0, column=0, sticky="w")
-        ctk.CTkButton(hdr, text="＋ Add PACS…", width=110,
-                      command=self._add).grid(row=0, column=1, sticky="e")
+        self._managed = config.destinations_are_managed()
+        ctk.CTkButton(hdr, text="Export as policy…", width=130, fg_color="gray",
+                      command=self._export_policy).grid(row=0, column=1, padx=6)
+        self._add_btn = ctk.CTkButton(hdr, text="＋ Add PACS…", width=110,
+                                      command=self._add)
+        self._add_btn.grid(row=0, column=2, sticky="e")
+        if self._managed:
+            self._add_btn.configure(state="disabled")
         r += 1
+
+        if self._managed:
+            ctk.CTkLabel(
+                self.body, text="Destinations are centrally managed by policy "
+                "(destinations.policy.json) — read-only.",
+                text_color=theme.MUTED, font=ctk.CTkFont(size=11)).grid(
+                row=r, column=0, columnspan=2, sticky="w", padx=4, pady=(0, 2))
+            r += 1
 
         self.dest_list = ctk.CTkFrame(self.body)
         self.dest_list.grid(row=r, column=0, columnspan=2, sticky="ew", pady=4)
@@ -279,13 +293,37 @@ class SettingsDialog(ctk.CTkToplevel):
             ctk.CTkLabel(row, text=f"{n.name}\n{n.aetitle}@{n.host}:{n.port}{tls}",
                          anchor="w", justify="left").grid(
                 row=0, column=0, sticky="w", padx=10, pady=6)
-            ctk.CTkButton(row, text="Edit", width=56,
-                          command=lambda k=i: self._edit(k)).grid(row=0,
-                                                                  column=1, padx=2)
+            edit_state = "disabled" if getattr(self, "_managed", False) else "normal"
+            ctk.CTkButton(row, text="Edit", width=56, state=edit_state,
+                          command=lambda k=i: self._edit(k)).grid(
+                row=0, column=1, padx=2)
             ctk.CTkButton(row, text="Delete", width=64, fg_color=theme.DANGER,
+                          state=edit_state,
                           command=lambda k=i: self._delete(k)).grid(
                 row=0, column=2, padx=(2, 8))
         self._refresh_roles()
+
+    def _export_policy(self):
+        if not self.app.destinations:
+            self._flash("No destinations to export.", error=True)
+            return
+        path = filedialog.asksaveasfilename(
+            title="Export destinations as policy",
+            defaultextension=".json", initialfile=config.POLICY_FILENAME,
+            filetypes=[("Policy JSON", "*.json")])
+        if not path:
+            return
+        try:
+            config.export_policy(self.app.destinations, path)
+        except Exception as exc:  # noqa: BLE001
+            self._flash(f"Export failed: {exc}", error=True)
+            return
+        messagebox.showinfo(
+            "Policy exported",
+            f"Wrote {len(self.app.destinations)} destination(s) to:\n{path}\n\n"
+            "To enforce it, place this file next to Print2PACS.exe (name it "
+            f"{config.POLICY_FILENAME}), add any approved query→send pairs, and "
+            "relaunch. The in-app editor will then be locked.")
 
     def _refresh_roles(self):
         names = [n.name for n in self.app.destinations]
