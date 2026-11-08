@@ -84,6 +84,28 @@ def test_probe_parses_ffmpeg_output(monkeypatch):
     assert meta.nframes == round(3.5 * 29.97)
 
 
+def test_transcode_uses_mpegts_container_and_square_pixels(monkeypatch, tmp_path):
+    """R13: we must mux into a container (MPEG-TS), not emit a raw H.264 stream,
+    and force square pixels."""
+    from pathlib import Path
+    captured = {}
+
+    def fake_run(args, **kw):
+        captured["args"] = args
+        out = Path(args[args.index("-y") + 1])
+        out.write_bytes(b"\x47" + b"TSDATA" * 20)      # non-empty fake TS output
+        return types.SimpleNamespace(returncode=0, stdout=b"",
+                                     stderr=b"frame=   42 fps=30 q=28.0")
+
+    monkeypatch.setattr(ffmpeg_tools, "run", fake_run)
+    frames = video.transcode_to_mpegts(tmp_path / "in.mp4", tmp_path / "out.ts")
+    assert frames == 42
+    a = captured["args"]
+    assert a[a.index("-f") + 1] == "mpegts"            # container, not raw h264
+    assert any("setsar=1" in x for x in a)             # square pixel aspect ratio
+    assert "high" in a and "4.1" in a                  # High Profile / Level 4.1
+
+
 def test_full_video_pipeline_integration(pacs, tmp_path):
     """End-to-end: synth video -> transcode -> DICOM -> store. Needs ffmpeg."""
     import pytest
@@ -91,10 +113,11 @@ def test_full_video_pipeline_integration(pacs, tmp_path):
         pytest.skip("ffmpeg not available")
     src = tmp_path / "src.mp4"
     try:
-        # Generate a 2s test pattern with the bundled/system ffmpeg.
+        # Odd dimensions on purpose: the encoder scales to even, and the DICOM
+        # header must reflect the ENCODED output (320x240), not the 321x241 source.
         proc = ffmpeg_tools.run(
-            ["-f", "lavfi", "-i", "testsrc=size=320x240:rate=15:duration=2",
-             "-pix_fmt", "yuv420p", "-y", str(src)], timeout=120)
+            ["-f", "lavfi", "-i", "testsrc=size=321x241:rate=15:duration=2",
+             "-pix_fmt", "yuv444p", "-y", str(src)], timeout=120)   # odd dims ok
         if proc.returncode != 0 or not src.exists():
             pytest.skip("ffmpeg could not generate a test clip")
         ctx = reconcile.lookup_studies("ME", pacs.node, accession="ACC1")[0]
@@ -104,5 +127,12 @@ def test_full_video_pipeline_integration(pacs, tmp_path):
         pytest.skip(f"ffmpeg could not be executed here: {exc}")
     assert ds.SOPClassUID == video.VIDEO_SOP_CLASS_UID
     assert ds.NumberOfFrames > 0
+    # R13: header matches the encoded output (even dims), not the odd source.
+    assert (ds.Columns, ds.Rows) == (320, 240)
+    assert ds.Columns % 2 == 0 and ds.Rows % 2 == 0
+    # PixelData carries an MPEG-TS container (sync byte 0x47), not raw H.264.
+    # (The first fragment is the Basic Offset Table; the stream fragment follows.)
+    from pydicom.encaps import generate_fragments
+    assert any(f[:1] == b"\x47" for f in generate_fragments(ds.PixelData))
     result = send.send_series("ME", pacs.node, [ds], tmp_path / "vjob2")
     assert result.sent == 1 and result.failed == 0

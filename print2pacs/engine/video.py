@@ -1,9 +1,13 @@
 """Convert video files into DICOM Video Photographic Image Storage objects.
 
-DICOM does not store AVI/MP4/MOV containers; it carries an encapsulated H.264
-(or MPEG-2/HEVC) elementary stream. Here we transcode any common video to a
-conformant **MPEG-4 AVC/H.264 High Profile / Level 4.1** stream and encapsulate
-it, stamped onto the existing study as a new series.
+We transcode any common video to **MPEG-4 AVC/H.264 High Profile / Level 4.1**
+and encapsulate it, stamped onto the existing study as a new series.
+
+DICOM PS3.5 8.2.7 requires the H.264 bit stream for transfer syntax
+1.2.840.10008.1.2.4.102 to be carried in an **MPEG-2 Transport Stream (MPEG-TS)**
+or MP4 container -- not a raw Annex B elementary stream -- so we mux to MPEG-TS,
+force a square pixel aspect ratio, and read Rows/Columns/CineRate/FrameTime from
+the *encoded output* (not the source) so the header matches the actual stream.
 """
 
 from __future__ import annotations
@@ -110,24 +114,28 @@ def first_frame(path: str | Path, max_size: int = 256) -> Image.Image | None:
 
 
 # ---------------------------------------------------------------------------
-# Transcode to a DICOM-conformant H.264 elementary stream
+# Transcode to a DICOM-conformant H.264 stream in an MPEG-TS container
 # ---------------------------------------------------------------------------
 # Count frames from ffmpeg's progress output (exact).
 _FRAME_RE = re.compile(r"frame=\s*(\d+)")
 
 
-def transcode_h264(path: str | Path, out_path: str | Path) -> int:
-    """Transcode to H.264 High/4.1, yuv420p, even dims; return frame count."""
+def transcode_to_mpegts(path: str | Path, out_path: str | Path) -> int:
+    """Transcode to H.264 High/4.1 in an MPEG-TS container; return frame count.
+
+    PS3.5 8.2.7 requires a container (MPEG-TS/MP4), so this emits ``-f mpegts``
+    rather than a raw elementary stream. Pixels are forced square (``setsar=1``)
+    and dimensions to even values (required by yuv420p / the profile).
+    """
     out_path = Path(out_path)
-    # High Profile / Level 4.1, 4:2:0, even dimensions (required by yuv420p).
     proc = ffmpeg_tools.run([
         "-i", str(path),
         "-an",                                  # no audio in the DICOM stream
         "-c:v", "libx264",
         "-profile:v", "high", "-level:v", "4.1",
         "-pix_fmt", "yuv420p",
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-f", "h264",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2,setsar=1",
+        "-f", "mpegts",
         "-y", str(out_path),
     ], timeout=3600)
     if proc.returncode != 0 or not out_path.exists() or out_path.stat().st_size == 0:
@@ -236,15 +244,17 @@ def convert_video(path: str | Path, context: StudyContext,
                   series_uid: str | None = None) -> FileDataset:
     """Transcode a video file and wrap it as a Video Photographic DICOM object."""
     path = Path(path)
-    meta = probe(path)
     with tempfile.TemporaryDirectory() as td:
-        out = Path(td) / "stream.h264"
-        frames = transcode_h264(path, out)
-        if frames:
-            meta.nframes = frames
+        out = Path(td) / "stream.ts"
+        frames = transcode_to_mpegts(path, out)
+        # Read geometry/fps from the ENCODED output so the DICOM header matches
+        # the actual stream (scaling to even/square dims can change dimensions).
+        meta = probe(out)
         stream = out.read_bytes()
+    if frames:
+        meta.nframes = frames
     series_uid = series_uid or generate_uid()
-    log.info("Converted video %s -> %d frames, %dx%d @ %.2f fps",
+    log.info("Converted video %s -> %d frames, %dx%d @ %.2f fps (MPEG-TS)",
              path.name, meta.nframes, meta.width, meta.height, meta.fps)
     return build_video_dataset(stream, meta, context, series_info,
                                series_uid=series_uid)
