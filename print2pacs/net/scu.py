@@ -81,8 +81,10 @@ class StoreResult:
     sent: int = 0
     failed: int = 0
     warnings: int = 0
+    uncertain: int = 0
     errors: list[str] = field(default_factory=list)
     warning_details: list[str] = field(default_factory=list)
+    uncertain_details: list[str] = field(default_factory=list)
 
     @property
     def total(self) -> int:
@@ -91,7 +93,24 @@ class StoreResult:
     @property
     def clean(self) -> bool:
         """True only when every object was accepted with no warning/failure."""
-        return self.sent > 0 and self.failed == 0 and self.warnings == 0
+        return (self.sent > 0 and self.failed == 0 and self.warnings == 0
+                and self.uncertain == 0)
+
+
+def classify_store_status(status) -> tuple[str, str]:
+    """Map a C-STORE response status to (state, code).
+
+    States: ``sent`` (success), ``warning`` (accepted with coercion/discard),
+    ``rejected`` (the archive refused it), ``uncertain`` (no usable response -
+    the object may or may not have been stored).
+    """
+    if status and status.Status == 0x0000:
+        return "sent", "0x0000"
+    if status and status.Status in (0xB000, 0xB006, 0xB007):
+        return "warning", f"0x{status.Status:04x}"
+    if status:
+        return "rejected", f"0x{status.Status:04x}"
+    return "uncertain", "no-response"
 
 
 # ---------------------------------------------------------------------------
@@ -205,8 +224,16 @@ def c_store(my_aetitle: str, node: Node, files: Iterable[Path],
             progress: Progress = _noop,
             on_frac: Callable[[float], None] | None = None,
             should_cancel: Callable[[], bool] | None = None,
-            timeout: int | None = None, tls_args=None) -> StoreResult:
-    """Send DICOM files via C-STORE over one association."""
+            timeout: int | None = None, tls_args=None,
+            on_result: Callable[[Path, str, str], None] | None = None
+            ) -> StoreResult:
+    """Send DICOM files via C-STORE over one association.
+
+    ``on_result(file, state, code)`` is called for every object that is actually
+    attempted, with ``state`` from :func:`classify_store_status`. Objects not
+    attempted (association lost / cancelled) are left for the caller to resume -
+    they are not reported as failed.
+    """
     timeout = timeout or node.timeout
     files = [Path(f) for f in files]
     result = StoreResult()
@@ -240,30 +267,38 @@ def c_store(my_aetitle: str, node: Node, files: Iterable[Path],
                 progress("Cancelled.")
                 break
             if not assoc.is_established:
-                result.errors.append("Association lost during transfer.")
-                result.failed += (total - i + 1)
+                # Connection dropped between objects: the rest were NOT attempted,
+                # so leave them for the caller to resume (do not mark failed).
+                result.errors.append(
+                    f"Association lost during transfer; {total - i + 1} object(s)"
+                    " not attempted.")
                 break
             try:
                 ds = dcmread(str(f), force=True)
                 status = assoc.send_c_store(ds)
-                if status and status.Status == 0x0000:
-                    result.sent += 1
-                elif status and status.Status in (0xB000, 0xB006, 0xB007):
-                    # Accepted *with a warning* (e.g. coercion / element discard).
-                    # Counted as sent, but recorded separately so the UI never
-                    # presents a coerced/partial store as a clean success.
-                    result.sent += 1
-                    result.warnings += 1
-                    result.warning_details.append(
-                        f"{f.name}: accepted with warning "
-                        f"0x{status.Status:04x}")
-                else:
-                    code = f"0x{status.Status:04x}" if status else "no-response"
-                    result.failed += 1
-                    result.errors.append(f"{f.name}: {code}")
+                state, code = classify_store_status(status)
             except Exception as exc:  # noqa: BLE001
+                # Bytes may have reached the archive before the error -> uncertain.
+                state, code = "uncertain", f"error: {str(exc)[:160]}"
+
+            if state == "sent":
+                result.sent += 1
+            elif state == "warning":
+                # Accepted, but coerced/discarded: counted as sent yet recorded
+                # separately so it never reads as a clean success.
+                result.sent += 1
+                result.warnings += 1
+                result.warning_details.append(
+                    f"{f.name}: accepted with warning {code}")
+            elif state == "uncertain":
+                result.uncertain += 1
+                result.uncertain_details.append(f"{f.name}: {code}")
+            else:  # rejected
                 result.failed += 1
-                result.errors.append(f"{f.name}: {str(exc)[:200]}")
+                result.errors.append(f"{f.name}: {code}")
+
+            if on_result is not None:
+                on_result(f, state, code)
             if on_frac:
                 on_frac(i / total)
     finally:

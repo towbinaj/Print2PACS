@@ -18,6 +18,17 @@ Safety (why re-filing a foreign DICOM is not an entrypoint):
   * Private/vendor tags can optionally be stripped (``strip_private``) for sites
     that do not want opaque vendor blobs forwarded into the archive.
 
+Identity consistency (why the re-filed object is unambiguously the target patient):
+  * The top-level Patient/Study identity is overwritten from the looked-up study,
+    AND the ORIGINAL patient's residual identifiers are removed -- issuer, other
+    IDs/names, and any patient identity nested inside sequences -- so the object
+    never carries two conflicting patient IDs. Links back into the original study
+    (referenced/source image, study, series, PPS) are stripped because they would
+    dangle on the target study; invalidated digital signatures are removed too.
+    Clinical content (pixels, report text, measurements) is left intact.
+  * The on-disk file is hashed when it is added; if it changes before the send,
+    the re-file is refused (the reviewed object must be the one that is sent).
+
 Only DICOM objects go through this path. Images, PDFs and video are rasterized or
 re-encoded to pixels elsewhere, which already discards anything embedded in the
 original container.
@@ -25,7 +36,8 @@ original container.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import hashlib
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from pydicom import dcmread
@@ -45,6 +57,14 @@ _PREAMBLE = b"\x00" * 128
 
 class NotDicom(Exception):
     """Raised when a file is not a usable DICOM object."""
+
+
+def _sha256(path: str | Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -77,6 +97,7 @@ class DicomSource:
     modality: str
     description: str          # original SeriesDescription (for display)
     nframes: int = 1
+    content_sha256: str = ""  # hash of the file bytes when it was added
 
     @property
     def sop_class_name(self) -> str:
@@ -121,12 +142,64 @@ def load_dicom(path: str | Path) -> DicomSource:
         modality=str(getattr(ds, "Modality", "") or ""),
         description=str(getattr(ds, "SeriesDescription", "") or ""),
         nframes=nframes,
+        content_sha256=_sha256(p),
     )
 
 
 # ---------------------------------------------------------------------------
 # Re-stamping onto the target study
 # ---------------------------------------------------------------------------
+# Elements removed from the top level of a re-filed object. They either name the
+# ORIGINAL patient (a second, conflicting identity) or point into the ORIGINAL
+# study (links that resolve to nothing once the object is on the target study).
+_STRIP_TOP_LEVEL = (
+    # residual patient identity
+    "IssuerOfPatientID", "IssuerOfPatientIDQualifiersSequence",
+    "TypeOfPatientID", "OtherPatientIDs", "OtherPatientIDsSequence",
+    "OtherPatientNames", "ReferencedPatientSequence",
+    # stale order / accession identity
+    "IssuerOfAccessionNumberSequence", "RequestAttributesSequence",
+    # links into the original study (would dangle)
+    "ReferencedStudySequence", "ReferencedSeriesSequence",
+    "ReferencedImageSequence", "SourceImageSequence",
+    "ReferencedInstanceSequence", "ReferencedPerformedProcedureStepSequence",
+    # audit trail that can carry the old identity back in
+    "OriginalAttributesSequence",
+    # signatures invalidated by re-stamping
+    "DigitalSignaturesSequence", "MACParametersSequence",
+)
+
+# Patient/accession identifiers purged wherever they appear in NESTED sequences.
+_NESTED_IDENTITY = (
+    "PatientID", "PatientName", "IssuerOfPatientID", "TypeOfPatientID",
+    "OtherPatientIDs", "OtherPatientIDsSequence", "OtherPatientNames",
+    "AccessionNumber",
+)
+
+
+def _scrub_nested_identity(ds) -> None:
+    """Recursively delete foreign patient/accession identifiers from sequences."""
+    for elem in ds:
+        if elem.VR == "SQ":
+            for item in elem.value:
+                for kw in _NESTED_IDENTITY:
+                    if kw in item:
+                        del item[kw]
+                _scrub_nested_identity(item)
+
+
+def _scrub_foreign_identity(ds: FileDataset) -> None:
+    """Remove the original patient's residual identity and stale study links.
+
+    The correct top-level Patient/Study identity must already be set; this clears
+    everything that would otherwise contradict it. Clinical content is untouched.
+    """
+    for kw in _STRIP_TOP_LEVEL:
+        if kw in ds:
+            del ds[kw]
+    _scrub_nested_identity(ds)
+
+
 def _ensure_valid(ds: FileDataset, name: str) -> None:
     if not getattr(ds, "SOPClassUID", None):
         raise NotDicom(f"{name}: missing SOP Class UID; not a storable object.")
@@ -140,10 +213,12 @@ def restamp(ds: FileDataset, context: StudyContext, series_info: SeriesInfo, *,
             strip_private: bool = False) -> FileDataset:
     """Re-file ``ds`` onto ``context``'s study as a new series, in place.
 
-    Patient + study identifiers are overwritten from ``context``; a new series
-    and SOP Instance UID are assigned. The object's own Modality, SOP Class,
-    transfer syntax and pixel data are preserved. The preamble is zeroed and the
-    File Meta rebuilt so the sent bytes are a clean pydicom reconstruction.
+    Patient + study identifiers are overwritten from ``context`` and the original
+    patient's residual identity / stale study links are scrubbed, so the object
+    unambiguously belongs to the target patient. A new series and SOP Instance UID
+    are assigned. The object's own Modality, SOP Class, transfer syntax and pixel
+    data are preserved. The preamble is zeroed and the File Meta rebuilt so the
+    sent bytes are a clean pydicom reconstruction.
     """
     if not context.study_uid:
         raise ValueError("StudyContext.study_uid is required (reconcile first).")
@@ -178,6 +253,10 @@ def restamp(ds: FileDataset, context: StudyContext, series_info: SeriesInfo, *,
     if strip_private:
         ds.remove_private_tags()
 
+    # --- Identity consistency: purge the ORIGINAL patient's residual identity
+    #     and stale links to the original study (top-level + nested). ---
+    _scrub_foreign_identity(ds)
+
     # --- SOP Common (new identity so it cannot collide with the original) ---
     ds.SOPInstanceUID = new_sop
 
@@ -193,22 +272,42 @@ def restamp(ds: FileDataset, context: StudyContext, series_info: SeriesInfo, *,
 
 
 def convert_dicoms(sources: list[DicomSource], context: StudyContext,
-                   series_info: SeriesInfo, *, series_uid: str | None = None,
-                   strip_private: bool = False,
-                   start_number: int = 1) -> list[FileDataset]:
-    """Load dropped DICOM objects and re-file them as one new series."""
-    series_uid = series_uid or generate_uid()
+                   series_info: SeriesInfo, *, strip_private: bool = False,
+                   start_series_number: int | None = None) -> list[FileDataset]:
+    """Load dropped DICOM objects and re-file them onto the target study.
+
+    Objects are grouped by (Modality, SOP Class) and each group becomes its own
+    new series -- mixing, e.g., a US clip and a CR image into one series would be
+    semantically wrong. Series numbers increment from ``series_info.series_number``
+    (or ``start_series_number``). Each file is re-hashed and refused if it changed
+    since it was added.
+    """
+    base_num = int(start_series_number if start_series_number is not None
+                   else series_info.series_number)
+
+    groups: dict[tuple[str, str], list[DicomSource]] = {}
+    for src in sources:
+        groups.setdefault((src.modality, src.sop_class_uid), []).append(src)
+
     out: list[FileDataset] = []
-    for i, src in enumerate(sources, start_number):
-        try:
-            ds = dcmread(str(src.path), force=True)
-        except Exception as exc:  # noqa: BLE001
-            raise NotDicom(
-                f"{Path(src.path).name}: could not read DICOM ({exc}).") from exc
-        _ensure_valid(ds, Path(src.path).name)
-        restamp(ds, context, series_info, series_uid=series_uid,
-                instance_number=i, strip_private=strip_private)
-        out.append(ds)
-    log.info("Re-filed %d DICOM object(s) into series %s (strip_private=%s)",
-             len(out), series_uid, strip_private)
+    for offset, grp in enumerate(groups.values()):
+        series_uid = generate_uid()
+        gi = replace(series_info, series_number=base_num + offset)
+        for i, src in enumerate(grp, 1):
+            name = Path(src.path).name
+            if src.content_sha256 and _sha256(src.path) != src.content_sha256:
+                raise NotDicom(
+                    f"{name}: this file changed since it was added; "
+                    "remove it and add it again.")
+            try:
+                ds = dcmread(str(src.path), force=True)
+            except Exception as exc:  # noqa: BLE001
+                raise NotDicom(
+                    f"{name}: could not read DICOM ({exc}).") from exc
+            _ensure_valid(ds, name)
+            restamp(ds, context, gi, series_uid=series_uid,
+                    instance_number=i, strip_private=strip_private)
+            out.append(ds)
+    log.info("Re-filed %d DICOM object(s) into %d series (strip_private=%s)",
+             len(out), len(groups), strip_private)
     return out

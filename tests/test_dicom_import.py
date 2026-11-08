@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from pydicom import dcmread
-from pydicom.dataset import FileDataset, FileMetaDataset
+from pydicom.dataset import Dataset, FileDataset, FileMetaDataset
+from pydicom.sequence import Sequence
 from pydicom.uid import ExplicitVRLittleEndian, generate_uid
 
 from print2pacs.engine import dicom_import, reconcile, send
 from print2pacs.model import SeriesInfo, StudyContext
 
 US_SOP = "1.2.840.10008.5.1.4.1.1.6.1"      # Ultrasound Image Storage
+CR_SOP = "1.2.840.10008.5.1.4.1.1.1"        # Computed Radiography Image Storage
 
 TARGET = StudyContext(
     patient_id="NEW-001", patient_name="NEW^PATIENT", birth_date="19900202",
@@ -20,12 +23,15 @@ TARGET = StudyContext(
 SI = SeriesInfo(modality="OT", series_description="Re-filed", series_number=777)
 
 
-def _make_source(path, *, with_private=True, polyglot=True):
-    """Write a minimal but valid US DICOM instance, optionally with a PE-polyglot
-    preamble (MZ header) and a private tag block, to simulate a foreign object."""
+def _make_source(path, *, with_private=True, polyglot=True, foreign=False,
+                 modality="US", sop_class=US_SOP):
+    """Write a minimal but valid DICOM instance, optionally with a PE-polyglot
+    preamble (MZ header), a private tag block, and ``foreign`` residual identity
+    (other IDs/names, issuer, stale references, nested patient ID) to simulate an
+    outside object."""
     sop = generate_uid()
     fm = FileMetaDataset()
-    fm.MediaStorageSOPClassUID = US_SOP
+    fm.MediaStorageSOPClassUID = sop_class
     fm.MediaStorageSOPInstanceUID = sop
     fm.TransferSyntaxUID = ExplicitVRLittleEndian
     preamble = (b"MZ" + b"\x90" * 126) if polyglot else b"\x00" * 128
@@ -38,8 +44,8 @@ def _make_source(path, *, with_private=True, polyglot=True):
     ds.StudyInstanceUID = "1.2.999.1"
     ds.SeriesInstanceUID = "1.2.999.2"
     ds.SOPInstanceUID = sop
-    ds.SOPClassUID = US_SOP
-    ds.Modality = "US"
+    ds.SOPClassUID = sop_class
+    ds.Modality = modality
     ds.AccessionNumber = "OLDACC"
     ds.StudyID = "OLDSTID"
     ds.SeriesDescription = "ORIGINAL US"
@@ -52,6 +58,18 @@ def _make_source(path, *, with_private=True, polyglot=True):
     ds.HighBit = 7
     ds.PixelRepresentation = 0
     ds.PixelData = np.arange(64, dtype=np.uint8).tobytes()
+    if foreign:
+        ds.IssuerOfPatientID = "OLD-ISSUER"
+        ds.OtherPatientIDs = "ALT-OLD-ID"
+        ds.OtherPatientNames = "OLD^ALIAS"
+        ref = Dataset()
+        ref.ReferencedSOPClassUID = sop_class
+        ref.ReferencedSOPInstanceUID = generate_uid()
+        ds.SourceImageSequence = Sequence([ref])            # link to old study
+        nested = Dataset()
+        nested.PatientID = "NESTED-OLD"
+        nested.AccessionNumber = "NESTED-OLDACC"
+        ds.AdmittingDiagnosesCodeSequence = Sequence([nested])  # kept, scrubbed
     if with_private:
         block = ds.private_block(0x000b, "ACME 1.0", create=True)
         block.add_new(0x01, "LO", "sekret-blob")
@@ -147,6 +165,47 @@ def test_convert_many_shares_series_sequential_instances(tmp_path):
     assert len({d.SeriesInstanceUID for d in out}) == 1      # one new series
     assert len({d.SOPInstanceUID for d in out}) == 3         # distinct instances
     assert [d.InstanceNumber for d in out] == [1, 2, 3]
+
+
+def test_refile_scrubs_foreign_identity(tmp_path):
+    p, _ = _make_source(tmp_path / "a.dcm", foreign=True)
+    [ds] = dicom_import.convert_dicoms([dicom_import.load_dicom(p)], TARGET, SI)
+
+    # object now shows ONLY the target patient
+    assert ds.PatientID == "NEW-001"
+    assert str(ds.PatientName) == "NEW^PATIENT"
+    # residual foreign identity is gone
+    assert "IssuerOfPatientID" not in ds
+    assert "OtherPatientIDs" not in ds
+    assert "OtherPatientNames" not in ds
+    # stale links into the original study are removed
+    assert "SourceImageSequence" not in ds
+    # a kept sequence has its nested identity scrubbed
+    assert "AdmittingDiagnosesCodeSequence" in ds
+    item = ds.AdmittingDiagnosesCodeSequence[0]
+    assert "PatientID" not in item
+    assert "AccessionNumber" not in item
+    # clinical pixels survive
+    assert "PixelData" in ds
+
+
+def test_heterogeneous_objects_split_into_separate_series(tmp_path):
+    us, _ = _make_source(tmp_path / "us.dcm", modality="US", sop_class=US_SOP)
+    cr, _ = _make_source(tmp_path / "cr.dcm", modality="CR", sop_class=CR_SOP)
+    out = dicom_import.convert_dicoms(
+        [dicom_import.load_dicom(us), dicom_import.load_dicom(cr)], TARGET, SI)
+    assert len(out) == 2
+    assert len({d.SeriesInstanceUID for d in out}) == 2      # one series each
+    assert {int(d.SeriesNumber) for d in out} == {777, 778}  # sequential numbers
+    assert {d.SOPClassUID for d in out} == {US_SOP, CR_SOP}  # modalities preserved
+
+
+def test_refile_refused_if_file_changed_after_add(tmp_path):
+    p, _ = _make_source(tmp_path / "a.dcm")
+    src = dicom_import.load_dicom(p)
+    p.write_bytes(p.read_bytes() + b"tampered")   # change the file after review
+    with pytest.raises(dicom_import.NotDicom):
+        dicom_import.convert_dicoms([src], TARGET, SI)
 
 
 # --------------------------------------------------------------- send pipeline

@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from tkinter import messagebox
+
 import customtkinter as ctk
 
 from ..model import Node
+from . import theme
 
 
 class AddDestinationDialog(ctk.CTkToplevel):
@@ -73,3 +76,72 @@ class AddDestinationDialog(ctk.CTkToplevel):
             return
         self.on_save(node)
         self.destroy()
+
+
+class RecoveryDialog(ctk.CTkToplevel):
+    """Offer to resume / review / discard sends interrupted by a crash or close."""
+
+    def __init__(self, parent, jobs, on_resume, on_discard):
+        super().__init__(parent)
+        self.on_resume = on_resume
+        self.on_discard = on_discard
+        self.title("Unfinished sends")
+        self.geometry("580x400")
+        self.minsize(520, 320)
+        self.transient(parent)
+        self.grab_set()
+
+        ctk.CTkLabel(
+            self, text="These sends did not finish. Resume re-sends the same "
+            "objects (no duplicates); Open shows the files to review; Discard "
+            "deletes them.", wraplength=540, justify="left").pack(
+            padx=16, pady=(14, 6), anchor="w")
+
+        body = ctk.CTkScrollableFrame(self)
+        body.pack(fill="both", expand=True, padx=12, pady=6)
+        body.grid_columnconfigure(0, weight=1)
+
+        from ..engine import spool
+        for job_dir, journal in jobs:
+            card = ctk.CTkFrame(body)
+            card.pack(fill="x", pady=4, padx=2)
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(card, text=spool.summary(journal), anchor="w",
+                         justify="left", wraplength=360).grid(
+                row=0, column=0, rowspan=2, sticky="w", padx=10, pady=8)
+            ctk.CTkButton(
+                card, text="Resume", width=84,
+                command=lambda d=job_dir, j=journal: self._resume(d, j)).grid(
+                row=0, column=1, padx=4, pady=(8, 2))
+            ctk.CTkButton(
+                card, text="Open", width=84, fg_color="gray",
+                command=lambda d=job_dir: self._open(d)).grid(
+                row=0, column=2, padx=(4, 10), pady=(8, 2))
+            ctk.CTkButton(
+                card, text="Discard", width=84, fg_color=theme.DANGER,
+                command=lambda d=job_dir, j=journal, c=card:
+                    self._discard(d, j, c)).grid(
+                row=1, column=1, columnspan=2, padx=(4, 10), pady=(0, 8),
+                sticky="e")
+
+        ctk.CTkButton(self, text="Close", width=90,
+                      command=self.destroy).pack(pady=10)
+
+    def _resume(self, job_dir, journal):
+        self.destroy()
+        self.on_resume(job_dir, journal)
+
+    def _open(self, job_dir):
+        import os
+        try:
+            os.startfile(str(job_dir))      # noqa: S606 - the user's own folder
+        except Exception:  # noqa: BLE001
+            messagebox.showinfo("Folder", str(job_dir))
+
+    def _discard(self, job_dir, journal, card):
+        if messagebox.askyesno(
+                "Discard job",
+                "Permanently delete this unfinished job and its DICOM files? "
+                "This cannot be undone."):
+            self.on_discard(job_dir, journal)
+            card.destroy()

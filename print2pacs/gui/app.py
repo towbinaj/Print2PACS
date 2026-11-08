@@ -22,13 +22,13 @@ except Exception:  # noqa: BLE001
     _HAS_DND = False
 
 from .. import APP_NAME, __version__, config, paths
-from ..engine import dicom_import, reconcile, sc_import, send, video
+from ..engine import dicom_import, reconcile, sc_import, spool, video
 from ..logging_setup import get_logger, setup as setup_logging
 from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SeriesInfo,
                      StudyContext)
 from ..net import scu
 from . import theme
-from .dialogs import AddDestinationDialog
+from .dialogs import AddDestinationDialog, RecoveryDialog
 from .widgets import run_threaded
 
 log = get_logger("gui")
@@ -93,6 +93,9 @@ class App(*_APP_BASES):
         self._build_statusbar()
         self._show_step(1)
         self._enable_window_drop()
+
+        # Recover any send that was interrupted by a crash / forced close.
+        self.after(700, self._check_recovery)
 
         # Quiet background update check (built exe only).
         from .. import updater
@@ -236,6 +239,13 @@ class App(*_APP_BASES):
         self.send_menu = ctk.CTkOptionMenu(self.confirm_box, values=["(none)"],
                                            command=lambda _v: None)
         self.send_menu.grid(row=1, column=1, sticky="w", padx=6, pady=(0, 12))
+
+        # Shown only when re-filing existing DICOM objects (see _refresh_confirm):
+        # a deliberate guard against sending the wrong patient's material.
+        self.dicom_confirm_var = ctk.BooleanVar(value=False)
+        self.dicom_confirm_chk = ctk.CTkCheckBox(
+            self.confirm_box, variable=self.dicom_confirm_var,
+            text="I confirm this material belongs to this patient")
 
         series = ctk.CTkFrame(f)
         series.grid(row=1, column=0, sticky="new", pady=(0, 10))
@@ -816,6 +826,17 @@ class App(*_APP_BASES):
             f"{s.study_date or '—'}\n"
             f"To send:  {', '.join(bits) or 'nothing'}{note}"))
 
+        # Re-filed DICOM carries its own pixels/overlays (which header re-stamping
+        # cannot change), so require an explicit per-send confirmation.
+        if self.dicoms:
+            self.dicom_confirm_var.set(False)
+            self.dicom_confirm_chk.configure(
+                text=f"I confirm these DICOM objects belong to {name}")
+            self.dicom_confirm_chk.grid(row=2, column=0, columnspan=2,
+                                        sticky="w", padx=14, pady=(0, 12))
+        else:
+            self.dicom_confirm_chk.grid_remove()
+
     def _series_info(self) -> SeriesInfo:
         conv = self.conv_var.get().split(" - ")[0].strip()
         sel = self.modality_var.get().strip()
@@ -844,6 +865,15 @@ class App(*_APP_BASES):
         if not si.series_description:
             messagebox.showwarning(APP_NAME, "Enter a series description.")
             return
+        if self.dicoms and not self.dicom_confirm_var.get():
+            messagebox.showwarning(
+                APP_NAME, "Please confirm the dropped DICOM objects belong to "
+                "this patient before sending.")
+            return
+        if self.dicoms:
+            log.info("Operator confirmed %d re-filed DICOM object(s) belong to "
+                     "patient %s / study %s", len(self.dicoms),
+                     self.chosen_study.patient_id, self.chosen_study.study_uid)
 
         # persist defaults for next time (keep the raw selection, incl. Auto)
         self.settings.send_destination = node.name
@@ -852,10 +882,7 @@ class App(*_APP_BASES):
         self.settings.default_conversion_type = si.conversion_type
         config.save_settings(self.settings)
 
-        self._sending = True
-        self.next_btn.configure(state="disabled")
-        self.back_btn.configure(state="disabled")
-        self.progress.set(0)
+        self._begin_send_ui()
         self.send_status.configure(text="Converting images…")
 
         study = self.chosen_study
@@ -869,19 +896,7 @@ class App(*_APP_BASES):
         auto_mod = self.modality_var.get() == AUTO_MODALITY
         forced_mod = si.modality      # resolved code when not in Auto mode
         tls_args = scu.tls_args_for(node)
-        job_dir = paths.new_job_dir()
-
-        def prog(msg):
-            try:
-                self.after(0, lambda: self.send_status.configure(text=msg))
-            except Exception:  # noqa: BLE001
-                pass
-
-        def frac(v):
-            try:
-                self.after(0, lambda: self.progress.set(v))
-            except Exception:  # noqa: BLE001
-                pass
+        prog, frac = self._mk_prog()
 
         def work():
             datasets = []
@@ -909,53 +924,134 @@ class App(*_APP_BASES):
                 datasets.append(video.convert_video(vpath, study, vi))
             if dicoms:
                 prog(f"Re-filing {len(dicoms)} DICOM object(s)…")
-                # all dropped DICOM objects become one new series (keep modality)
+                # re-filed objects are grouped into one new series per modality
+                # (convert_dicoms assigns series numbers from di.series_number)
                 di = replace(si, series_number=snum)
-                snum += 1
                 datasets.extend(dicom_import.convert_dicoms(
                     dicoms, study, di, strip_private=strip_private))
-            return send.send_series(my_ae, node, datasets, job_dir,
-                                    progress=prog, on_frac=frac,
-                                    cleanup=not keep, tls_args=tls_args)
+            job_dir = spool.prepare_job(datasets, node, study)
+            return spool.send_job(job_dir, my_ae, node, tls_args=tls_args,
+                                  progress=prog, on_frac=frac, keep_copy=keep)
 
-        def done(result):
-            self._sending = False
-            self.back_btn.configure(state="normal")
-            self.next_btn.configure(state="normal")
-            kept = (f"\n\nA copy of the sent DICOM is in:\n{job_dir}"
-                    if keep else "")
-            if result.clean:
-                self.progress.set(1)
-                messagebox.showinfo(
-                    APP_NAME,
-                    f"Sent {result.sent} object(s) to PACS successfully.\n\n"
-                    f"New series added to accession {study.accession}.{kept}")
-                self._reset_after_send()
-            elif result.failed == 0 and result.sent > 0:
-                # Accepted, but the archive returned a warning for one or more
-                # objects (coercion / element discard). Not a clean success:
-                # surface it and keep the job so the user can verify.
-                self.progress.set(1)
-                detail = "\n".join(result.warning_details[:8])
-                messagebox.showwarning(
-                    APP_NAME,
-                    f"PACS accepted {result.sent} object(s), but "
-                    f"{result.warnings} with warnings — the archive may have "
-                    "changed or dropped some data. Verify the new series on "
-                    f"PACS before relying on it.\n\n{detail}{kept}")
-            else:
-                detail = "\n".join(result.errors[:8]) or "Unknown error."
-                messagebox.showerror(
-                    APP_NAME,
-                    f"Sent {result.sent}, failed {result.failed}.\n\n{detail}{kept}")
+        def done(outcome):
+            self._end_send_ui()
+            self._after_send(outcome, keep, node)
 
         def err(exc):
-            self._sending = False
-            self.back_btn.configure(state="normal")
-            self.next_btn.configure(state="normal")
+            self._end_send_ui()
             messagebox.showerror(APP_NAME, f"Send failed:\n{exc}")
 
         run_threaded(self, work, done, err)
+
+    # ---- send UI helpers + partial-failure recovery --------------------------
+    def _begin_send_ui(self):
+        self._sending = True
+        self.next_btn.configure(state="disabled")
+        self.back_btn.configure(state="disabled")
+        self.progress.set(0)
+
+    def _end_send_ui(self):
+        self._sending = False
+        self.next_btn.configure(state="normal")
+        self.back_btn.configure(
+            state="normal" if self._step > 1 else "disabled")
+
+    def _mk_prog(self):
+        def prog(msg):
+            try:
+                self.after(0, lambda: self.send_status.configure(text=msg))
+            except Exception:  # noqa: BLE001
+                pass
+
+        def frac(v):
+            try:
+                self.after(0, lambda: self.progress.set(v))
+            except Exception:  # noqa: BLE001
+                pass
+        return prog, frac
+
+    def _after_send(self, outcome, keep, node):
+        """Report a send outcome and, for recoverable failures, offer a retry
+        that re-sends the SAME objects (same UIDs) without creating duplicates."""
+        store = outcome.store
+        study = self.chosen_study
+        acc = study.accession if study else ""
+        kept = (f"\n\nA copy is in:\n{outcome.job_dir}"
+                if keep and not outcome.discarded else "")
+
+        if outcome.resolved and store.warnings == 0:
+            self.progress.set(1)
+            messagebox.showinfo(
+                APP_NAME, f"Sent {store.sent} object(s) to PACS successfully.\n\n"
+                f"New series added to accession {acc}.{kept}")
+            self._reset_after_send()
+            return
+
+        if outcome.resolved:            # all stored, but some with warnings
+            self.progress.set(1)
+            detail = "\n".join(store.warning_details[:8])
+            messagebox.showwarning(
+                APP_NAME, f"PACS accepted {store.sent} object(s), but "
+                f"{store.warnings} with warnings — the archive may have changed "
+                "or dropped some data. Verify the new series on PACS.\n\n"
+                f"{detail}{kept}")
+            return
+
+        # Not fully stored: there are unsent and/or uncertain objects.
+        c = outcome.counts
+        stored = c["sent"] + c["warning"]
+        lines = list(store.errors[:5]) + list(store.uncertain_details[:5])
+        detail = "\n".join(lines) or "Some objects were not confirmed stored."
+        msg = (f"Stored {stored}, unsent {outcome.resumable}, uncertain "
+               f"{outcome.uncertain}.\n\n{detail}")
+        if outcome.uncertain:
+            msg += ("\n\nUncertain object(s) were NOT re-sent — the connection "
+                    "dropped before PACS confirmed them. Verify on PACS whether "
+                    "they arrived before resending.")
+        if outcome.resumable:
+            if messagebox.askyesno(
+                    APP_NAME, msg + f"\n\nRe-send the {outcome.resumable} unsent "
+                    "object(s) now (same objects, no duplicates)?"):
+                self._retry_job(outcome.job_dir, node, keep)
+                return
+        messagebox.showwarning(APP_NAME, msg + kept)
+
+    def _retry_job(self, job_dir, node, keep):
+        if self._sending or not node:
+            return
+        my_ae = self.settings.my_aetitle
+        tls_args = scu.tls_args_for(node)
+        self._begin_send_ui()
+        self.send_status.configure(text="Re-sending unsent object(s)…")
+        prog, frac = self._mk_prog()
+
+        def work():
+            return spool.send_job(job_dir, my_ae, node, tls_args=tls_args,
+                                  progress=prog, on_frac=frac, keep_copy=keep)
+
+        def done(outcome):
+            self._end_send_ui()
+            self._after_send(outcome, keep, node)
+
+        def err(exc):
+            self._end_send_ui()
+            messagebox.showerror(APP_NAME, f"Re-send failed:\n{exc}")
+
+        run_threaded(self, work, done, err)
+
+    # ---- startup recovery of interrupted sends -------------------------------
+    def _check_recovery(self):
+        try:
+            jobs = spool.unresolved_jobs()
+        except Exception:  # noqa: BLE001
+            return
+        if jobs:
+            RecoveryDialog(self, jobs, on_resume=self._resume_recovered,
+                           on_discard=lambda d, j: spool.discard_job(d))
+
+    def _resume_recovered(self, job_dir, journal):
+        self._retry_job(job_dir, spool.node_from_journal(journal),
+                        self.settings.keep_sent_copy)
 
     def _reset_after_send(self):
         self.pages = []
