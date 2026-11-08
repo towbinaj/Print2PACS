@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+import threading
 from dataclasses import replace
 from tkinter import filedialog, messagebox
 
@@ -338,6 +339,11 @@ class App(*_APP_BASES):
         self.progress = ctk.CTkProgressBar(prog)
         self.progress.set(0)
         self.progress.grid(row=0, column=0, sticky="ew", pady=(4, 2))
+        self.cancel_btn = ctk.CTkButton(prog, text="Cancel", width=90,
+                                        fg_color=theme.DANGER,
+                                        command=self._cancel_send)
+        self.cancel_btn.grid(row=0, column=1, padx=(8, 0))
+        self.cancel_btn.grid_remove()          # shown only during a send
         self.send_status = ctk.CTkLabel(prog, text="", text_color=theme.MUTED,
                                         anchor="w", wraplength=780,
                                         justify="left")
@@ -1074,7 +1080,8 @@ class App(*_APP_BASES):
                     dicoms, study, di, strip_private=strip_private))
             job_dir = spool.prepare_job(datasets, node, study)
             return spool.send_job(job_dir, my_ae, node, tls_args=tls_args,
-                                  progress=prog, on_frac=frac, keep_copy=keep)
+                                  progress=prog, on_frac=frac, keep_copy=keep,
+                                  should_cancel=self._cancel_event.is_set)
 
         def done(outcome):
             self._end_send_ui()
@@ -1089,8 +1096,11 @@ class App(*_APP_BASES):
     # ---- send UI helpers + partial-failure recovery --------------------------
     def _begin_send_ui(self):
         self._sending = True
+        self._cancel_event = threading.Event()
         self.next_btn.configure(state="disabled")
         self.back_btn.configure(state="disabled")
+        self.cancel_btn.configure(state="normal", text="Cancel")
+        self.cancel_btn.grid()
         self.progress.set(0)
 
     def _end_send_ui(self):
@@ -1098,6 +1108,25 @@ class App(*_APP_BASES):
         self.next_btn.configure(state="normal")
         self.back_btn.configure(
             state="normal" if self._step > 1 else "disabled")
+        self.cancel_btn.grid_remove()
+
+    def _cancel_send(self):
+        ev = getattr(self, "_cancel_event", None)
+        if ev is not None:
+            ev.set()
+            self.cancel_btn.configure(state="disabled", text="Cancelling…")
+            self.send_status.configure(
+                text="Cancelling after the current object…")
+
+    def _cooldown(self, seconds: int, reason: str):
+        """Briefly block re-sending after a destination refusal / failure."""
+        self.next_btn.configure(state="disabled")
+        self.send_status.configure(text=reason)
+
+        def _reenable():
+            if not self._sending:
+                self.next_btn.configure(state="normal")
+        self.after(int(seconds * 1000), _reenable)
 
     def _mk_prog(self):
         def prog(msg):
@@ -1121,6 +1150,15 @@ class App(*_APP_BASES):
         acc = study.accession if study else ""
         kept = (f"\n\nA copy is in:\n{outcome.job_dir}"
                 if keep and not outcome.discarded else "")
+
+        if getattr(outcome, "cancelled", False):
+            c = outcome.counts
+            messagebox.showwarning(
+                APP_NAME, "Send cancelled.\n\nStored "
+                f"{c['sent'] + c['warning']}, {outcome.resumable} not sent "
+                "(kept — resume from the recovery prompt next launch, or send "
+                f"again).{kept}")
+            return
 
         if outcome.resolved and store.warnings == 0:
             self.progress.set(1)
@@ -1151,6 +1189,14 @@ class App(*_APP_BASES):
             msg += ("\n\nUncertain object(s) were NOT re-sent — the connection "
                     "dropped before PACS confirmed them. Verify on PACS whether "
                     "they arrived before resending.")
+        refused = any(("a700" in e.lower() or "association" in e.lower())
+                      for e in store.errors)
+        if refused and outcome.resumable:
+            messagebox.showwarning(
+                APP_NAME, msg + "\n\nThe destination refused new objects or was "
+                "unreachable; waiting a few seconds before you can retry." + kept)
+            self._cooldown(5, "Destination busy/unreachable — retry shortly.")
+            return
         if outcome.resumable:
             if messagebox.askyesno(
                     APP_NAME, msg + f"\n\nRe-send the {outcome.resumable} unsent "
@@ -1170,7 +1216,8 @@ class App(*_APP_BASES):
 
         def work():
             return spool.send_job(job_dir, my_ae, node, tls_args=tls_args,
-                                  progress=prog, on_frac=frac, keep_copy=keep)
+                                  progress=prog, on_frac=frac, keep_copy=keep,
+                                  should_cancel=self._cancel_event.is_set)
 
         def done(outcome):
             self._end_send_ui()

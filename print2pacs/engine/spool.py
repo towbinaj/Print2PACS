@@ -18,6 +18,7 @@ permissions and is removed once every object is confirmed stored.
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import shutil
@@ -108,30 +109,45 @@ def summary(journal: dict) -> str:
 # ---------------------------------------------------------------------------
 # Lifecycle
 # ---------------------------------------------------------------------------
+class DiskFull(Exception):
+    """Raised when staging a job runs out of disk space."""
+
+
 def prepare_job(datasets, node: Node, context: StudyContext) -> Path:
-    """Serialize ``datasets`` to a new job folder and write the journal."""
+    """Serialize ``datasets`` to a new job folder and write the journal.
+
+    On a disk-full error nothing partial is left behind and ``DiskFull`` is
+    raised with a clear message.
+    """
     job_dir = paths.new_job_dir()
-    files = sc_import.save_datasets(datasets, job_dir)
-    items = []
-    for ds, f in zip(datasets, files):
-        items.append({
-            "file": f.name,
-            "sop_instance_uid": str(getattr(ds, "SOPInstanceUID", "")),
-            "sha256": _sha256(f),
-            "state": PREPARED,
-            "code": "",
-        })
-    journal = {
-        "created": _now(),
-        "destination": {"name": node.name, "aetitle": node.aetitle,
-                        "host": node.host, "port": int(node.port),
-                        "tls": bool(node.tls)},
-        "study_uid": context.study_uid,
-        "accession": context.accession,
-        "patient": str(context.patient_name or ""),
-        "items": items,
-    }
-    _write(job_dir, journal)
+    try:
+        files = sc_import.save_datasets(datasets, job_dir)
+        items = []
+        for ds, f in zip(datasets, files):
+            items.append({
+                "file": f.name,
+                "sop_instance_uid": str(getattr(ds, "SOPInstanceUID", "")),
+                "sha256": _sha256(f),
+                "state": PREPARED,
+                "code": "",
+            })
+        journal = {
+            "created": _now(),
+            "destination": {"name": node.name, "aetitle": node.aetitle,
+                            "host": node.host, "port": int(node.port),
+                            "tls": bool(node.tls)},
+            "study_uid": context.study_uid,
+            "accession": context.accession,
+            "patient": str(context.patient_name or ""),
+            "items": items,
+        }
+        _write(job_dir, journal)
+    except OSError as exc:
+        discard_job(job_dir)                 # don't leave a half-written job
+        if exc.errno == errno.ENOSPC:
+            raise DiskFull("Not enough disk space to prepare this send. "
+                           "Free up space and try again.") from exc
+        raise
     log.info("Spooled job %s: %d object(s) for study %s",
              job_dir.name, len(items), context.study_uid)
     return job_dir
@@ -146,6 +162,7 @@ class JobOutcome:
     resumable: int
     job_dir: Path
     discarded: bool = False
+    cancelled: bool = False
 
 
 def send_job(job_dir: Path, my_aetitle: str, node: Node, *, tls_args=None,
@@ -193,13 +210,14 @@ def send_job(job_dir: Path, my_aetitle: str, node: Node, *, tls_args=None,
     # syslog) emitted by managed infrastructure, which this build does not have.
     c = counts(journal)
     resolved = is_resolved(journal)
+    cancelled = bool(should_cancel and should_cancel())
     discarded = False
     if resolved and not keep_copy:
         discard_job(job_dir)
         discarded = True
     return JobOutcome(store=result, resolved=resolved, counts=c,
                       uncertain=c[UNCERTAIN], resumable=c[PREPARED] + c[REJECTED],
-                      job_dir=job_dir, discarded=discarded)
+                      job_dir=job_dir, discarded=discarded, cancelled=cancelled)
 
 
 def discard_job(job_dir: Path) -> None:

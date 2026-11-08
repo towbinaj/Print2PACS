@@ -142,3 +142,36 @@ def test_unresolved_jobs_lists_only_incomplete(spool_dir):
         assert spool.unresolved_jobs() == []
     finally:
         srv.shutdown()
+
+
+def test_cancel_keeps_job_and_marks_cancelled(spool_dir):
+    received = []
+
+    def store(e):
+        received.append(e.request.AffectedSOPInstanceUID)
+        return 0x0000
+
+    srv, node = _server(store)
+    try:
+        job = spool.prepare_job(_datasets(3), node, CTX)
+        out = spool.send_job(job, "ME", node, should_cancel=lambda: True)
+        assert out.cancelled is True
+        assert out.resolved is False
+        assert out.resumable == 3        # nothing attempted; all still prepared
+        assert job.exists()              # kept (not discarded) for resume
+        assert received == []            # c_store breaks before sending anything
+    finally:
+        srv.shutdown()
+
+
+def test_prepare_job_disk_full_raises_and_cleans_up(spool_dir, monkeypatch):
+    import errno as _errno
+
+    def boom(datasets, out_dir):
+        raise OSError(_errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(spool.sc_import, "save_datasets", boom)
+    node = Node(name="n", aetitle="N", host="127.0.0.1", port=104)
+    with pytest.raises(spool.DiskFull):
+        spool.prepare_job(_datasets(1), node, CTX)
+    assert list(spool_dir.glob("job_*")) == []     # no half-written job left
