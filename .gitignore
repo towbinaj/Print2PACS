@@ -20,6 +20,9 @@ Print2PACS-data/
 # Legacy commercial tool + real site config (kept locally as reference only)
 OldVersion/
 
+# External assessment package (kept locally as reference only, not shipped)
+assessment/
+
 # Foreign / site config that happens to live in this folder (never commit)
 DCMsettings.json
 

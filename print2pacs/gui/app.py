@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import os
 import sys
-import time
 from dataclasses import replace
 from tkinter import filedialog, messagebox
 
@@ -81,6 +80,9 @@ class App(*_APP_BASES):
         self.chosen_study: StudyContext | None = None
         self._step = 1
         self._sending = False
+        # Monotonic token so an older, slower C-FIND callback can never replace
+        # the results/selection from a newer lookup (stale-result suppression).
+        self._lookup_gen = 0
 
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -202,9 +204,9 @@ class App(*_APP_BASES):
         pid = ctk.CTkEntry(search, textvariable=self.pid_var)
         pid.grid(row=0, column=3, sticky="ew", padx=6, pady=12)
         pid.bind("<Return>", lambda _e: self._lookup())
-        ctk.CTkButton(search, text="Look up", width=100,
-                      command=self._lookup).grid(row=0, column=4,
-                                                 padx=(6, 12))
+        self.lookup_btn = ctk.CTkButton(search, text="Look up", width=100,
+                                        command=self._lookup)
+        self.lookup_btn.grid(row=0, column=4, padx=(6, 12))
 
         self.results = ctk.CTkScrollableFrame(f, label_text="Matching study")
         self.results.grid(row=2, column=0, sticky="nsew")
@@ -693,7 +695,8 @@ class App(*_APP_BASES):
         self.find_status.configure(text="Testing connection…")
 
         def work():
-            return scu.c_echo(self.settings.my_aetitle, node)
+            return scu.c_echo(self.settings.my_aetitle, node,
+                              tls_args=scu.tls_args_for(node))
 
         def done(res):
             self.find_status.configure(text=res.message)
@@ -717,17 +720,29 @@ class App(*_APP_BASES):
         self.settings.query_destination = node.name
         config.save_settings(self.settings)
         self.find_status.configure(text="Querying PACS…")
+        # A new lookup invalidates any prior selection and any in-flight query.
         self.chosen_study = None
+        self._clear_results()
+        self._lookup_gen += 1
+        gen = self._lookup_gen
+        self.lookup_btn.configure(state="disabled")
 
         def work():
             return reconcile.lookup_studies(
-                self.settings.my_aetitle, node, accession=acc, patient_id=pid)
+                self.settings.my_aetitle, node, accession=acc, patient_id=pid,
+                tls_args=scu.tls_args_for(node))
 
         def done(studies):
+            if gen != self._lookup_gen:
+                return                       # a newer lookup superseded this one
+            self.lookup_btn.configure(state="normal")
             self.studies = studies
             self._render_results()
 
         def err(exc):
+            if gen != self._lookup_gen:
+                return
+            self.lookup_btn.configure(state="normal")
             self.find_status.configure(text=str(exc))
             self._clear_results()
 
@@ -744,8 +759,11 @@ class App(*_APP_BASES):
                 text="No matching study found. Check the accession number.")
             return
         self.find_status.configure(
-            text=f"{len(self.studies)} match(es). Select the correct study.")
-        self._study_var = ctk.IntVar(value=0)
+            text=f"{len(self.studies)} match(es). Select the correct study "
+                 "to continue.")
+        # No pre-selection: the operator must deliberately choose a study. This
+        # prevents silently defaulting to the first of several matches.
+        self._study_var = ctk.IntVar(value=-1)
         for i, s in enumerate(self.studies):
             card = ctk.CTkFrame(self.results)
             card.grid(row=i, column=0, sticky="ew", pady=4, padx=2)
@@ -764,12 +782,14 @@ class App(*_APP_BASES):
             ctk.CTkLabel(card, text=detail, text_color=theme.MUTED,
                          anchor="w").grid(row=1, column=1, sticky="w",
                                           pady=(0, 8))
-        self._pick_study()
+        # chosen_study stays None until the operator clicks a radio button.
 
     def _pick_study(self):
         idx = self._study_var.get()
         if 0 <= idx < len(self.studies):
             self.chosen_study = self.studies[idx]
+            self.find_status.configure(
+                text="Study selected. Click Next to review and send.")
 
     # =====================================================================
     # Step 3 — review + send
@@ -848,8 +868,8 @@ class App(*_APP_BASES):
         strip_private = self.settings.strip_private_tags
         auto_mod = self.modality_var.get() == AUTO_MODALITY
         forced_mod = si.modality      # resolved code when not in Auto mode
-        job_dir = paths.jobs_dir() / (f"job_{study.accession or 'x'}_"
-                                      f"{time.strftime('%Y%m%d_%H%M%S')}")
+        tls_args = scu.tls_args_for(node)
+        job_dir = paths.new_job_dir()
 
         def prog(msg):
             try:
@@ -896,7 +916,7 @@ class App(*_APP_BASES):
                     dicoms, study, di, strip_private=strip_private))
             return send.send_series(my_ae, node, datasets, job_dir,
                                     progress=prog, on_frac=frac,
-                                    cleanup=not keep)
+                                    cleanup=not keep, tls_args=tls_args)
 
         def done(result):
             self._sending = False
@@ -904,13 +924,25 @@ class App(*_APP_BASES):
             self.next_btn.configure(state="normal")
             kept = (f"\n\nA copy of the sent DICOM is in:\n{job_dir}"
                     if keep else "")
-            if result.failed == 0 and result.sent > 0:
+            if result.clean:
                 self.progress.set(1)
                 messagebox.showinfo(
                     APP_NAME,
                     f"Sent {result.sent} object(s) to PACS successfully.\n\n"
                     f"New series added to accession {study.accession}.{kept}")
                 self._reset_after_send()
+            elif result.failed == 0 and result.sent > 0:
+                # Accepted, but the archive returned a warning for one or more
+                # objects (coercion / element discard). Not a clean success:
+                # surface it and keep the job so the user can verify.
+                self.progress.set(1)
+                detail = "\n".join(result.warning_details[:8])
+                messagebox.showwarning(
+                    APP_NAME,
+                    f"PACS accepted {result.sent} object(s), but "
+                    f"{result.warnings} with warnings — the archive may have "
+                    "changed or dropped some data. Verify the new series on "
+                    f"PACS before relying on it.\n\n{detail}{kept}")
             else:
                 detail = "\n".join(result.errors[:8]) or "Unknown error."
                 messagebox.showerror(

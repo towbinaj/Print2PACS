@@ -17,17 +17,33 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
-# Pinned BtbN FFmpeg build (GPL, win64). Update URL + SHA together on bump.
+# Pinned BtbN FFmpeg build (GPL, win64).
+#
+# This points at an *immutable, dated* BtbN autobuild release (NOT the rolling
+# ``latest`` tag, whose asset is rebuilt daily under the same URL). FFMPEG_SHA256
+# is mandatory and enforced: an empty or mismatched hash aborts the build rather
+# than bundling an unverified binary. To update ffmpeg, pick a new dated release
+# at https://github.com/BtbN/FFmpeg-Builds/releases and set BOTH URL and SHA-256
+# together (the SHA-256 is shown as the asset ``digest`` in the GitHub API).
+#
+# NOTE: BtbN prunes old dated builds after a while. If this URL starts returning
+# 404, CI will fail loudly (by design) — re-pin to a current dated build. The
+# durable fix is to mirror the chosen artifact in hospital-controlled storage.
 FFMPEG_URL = ("https://github.com/BtbN/FFmpeg-Builds/releases/download/"
-              "latest/ffmpeg-master-latest-win64-gpl.zip")
-# Set to a known SHA-256 to enforce integrity; empty = accept + print it.
-FFMPEG_SHA256 = ""
+              "autobuild-2026-11-08-12-35/"
+              "ffmpeg-N-128691-gcc583787bb-win64-gpl.zip")
+FFMPEG_SHA256 = "33c5d91e11daaae7ad057b98216bb918182d80396f51891c539aa1ab15cc6aa1"
 
 WANT = ("ffmpeg.exe",)   # ffmpeg only; metadata is probed via ffmpeg itself
 DEST = Path(__file__).resolve().parent.parent / "assets" / "ffmpeg"
 
 
 def main() -> int:
+    if not FFMPEG_SHA256:
+        print("ERROR: FFMPEG_SHA256 is not set; refusing to fetch an "
+              "unverified binary.", file=sys.stderr)
+        return 1
+
     DEST.mkdir(parents=True, exist_ok=True)
     if all((DEST / w).exists() for w in WANT):
         print(f"ffmpeg already present in {DEST}")
@@ -37,8 +53,9 @@ def main() -> int:
     data = urllib.request.urlopen(FFMPEG_URL, timeout=300).read()  # noqa: S310
     digest = hashlib.sha256(data).hexdigest()
     print(f"Downloaded {len(data) / 1e6:.1f} MB  sha256={digest}")
-    if FFMPEG_SHA256 and digest != FFMPEG_SHA256:
-        print("ERROR: SHA-256 mismatch", file=sys.stderr)
+    if digest != FFMPEG_SHA256:
+        print(f"ERROR: SHA-256 mismatch\n  expected {FFMPEG_SHA256}\n  got      "
+              f"{digest}", file=sys.stderr)
         return 1
 
     extracted = 0

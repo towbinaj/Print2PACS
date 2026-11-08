@@ -19,13 +19,19 @@ jobs:
   release:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
         with:
           fetch-depth: 0
 
       - name: Decide version
         id: ver
         shell: pwsh
+        # The commit message is attacker-influenced data, so it is passed in as
+        # an environment variable rather than interpolated into the script body
+        # (inline ${{ github.event.head_commit.message }} could terminate the
+        # string and inject runner commands).
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
           if ($env:GITHUB_REF_TYPE -eq 'tag') {
             $v = "$env:GITHUB_REF_NAME".TrimStart('v')
@@ -34,10 +40,7 @@ jobs:
             "tag=v$v"    | Out-File $env:GITHUB_OUTPUT -Append
             Write-Host "Manual tag release: v$v"
           } else {
-            $full = @'
-          ${{ github.event.head_commit.message }}
-          '@
-            $subject = ($full -split "`n")[0]
+            $subject = ("$env:COMMIT_MSG" -split "`n")[0]
             if ($subject -match '\[release(?:\s*[: ]\s*(major|minor|patch))?\]') {
               $bump = if ($Matches[1]) { $Matches[1] } else { 'patch' }
               $last = (git tag --list 'v*' --sort=-v:refname | Select-Object -First 1)
@@ -62,7 +65,7 @@ jobs:
 
       - name: Set up Python
         if: ${{ success() && steps.ver.outputs.do == 'true' }}
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: '3.14'
 
@@ -102,7 +105,7 @@ jobs:
 
       - name: Publish release
         if: ${{ success() && steps.ver.outputs.do == 'true' }}
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65  # v2
         with:
           tag_name: ${{ steps.ver.outputs.tag }}
           files: |

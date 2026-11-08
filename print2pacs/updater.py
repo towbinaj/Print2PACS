@@ -18,6 +18,7 @@ import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 from . import __version__
 from .logging_setup import get_logger
@@ -30,6 +31,38 @@ ASSET_NAME = "Print2PACS.exe"
 _API_LATEST = f"https://api.github.com/repos/{OWNER}/{REPO}/releases/latest"
 _HEADERS = {"User-Agent": f"Print2PACS/{__version__}",
             "Accept": "application/vnd.github+json"}
+
+# Only these hosts may serve update metadata or assets. Enforced on the initial
+# request *and* on every redirect, so a tampered API response cannot point the
+# download at an arbitrary server.
+_ALLOWED_HOSTS = frozenset({
+    "api.github.com",
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+})
+# Hard ceiling for a downloaded asset (today's exe is ~120 MB).
+_MAX_ASSET_BYTES = 400 * 1024 * 1024
+
+
+def _check_https_host(url: str) -> None:
+    """Raise unless ``url`` is HTTPS on an allow-listed GitHub host."""
+    parts = urlparse(url)
+    if parts.scheme != "https" or parts.hostname not in _ALLOWED_HOSTS:
+        raise ValueError(f"Refusing non-allow-listed update URL: {url!r}")
+
+
+class _AllowlistRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        _check_https_host(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _opener() -> urllib.request.OpenerDirector:
+    ctx = ssl.create_default_context()
+    return urllib.request.build_opener(
+        urllib.request.HTTPSHandler(context=ctx),
+        _AllowlistRedirectHandler())
 
 
 @dataclass
@@ -64,9 +97,9 @@ def can_self_update() -> bool:
 
 
 def _get(url: str, timeout: int = 15) -> bytes:
+    _check_https_host(url)
     req = urllib.request.Request(url, headers=_HEADERS)
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+    with _opener().open(req, timeout=timeout) as r:
         return r.read()
 
 
@@ -99,30 +132,48 @@ def check_latest(timeout: int = 15) -> UpdateInfo | None:
 
 def download(info: UpdateInfo, dest: Path, progress=None,
              timeout: int = 300) -> Path:
-    """Download the new exe to ``dest`` and verify its SHA-256 if published."""
+    """Download the new exe to ``dest`` and verify it.
+
+    Fails closed: the download is rejected unless the release publishes a
+    SHA-256 sidecar that matches the bytes received. URLs must be HTTPS on an
+    allow-listed GitHub host (checked on redirects too), and the payload is
+    capped at ``_MAX_ASSET_BYTES``.
+    """
     dest = Path(dest)
+    _check_https_host(info.url)
+    if not info.sha256_url:
+        raise ValueError(
+            "Update rejected: release has no SHA-256 checksum to verify.")
+
     req = urllib.request.Request(info.url, headers=_HEADERS)
-    with urllib.request.urlopen(req, timeout=timeout) as r, open(dest, "wb") as f:
+    hasher = hashlib.sha256()
+    with _opener().open(req, timeout=timeout) as r, open(dest, "wb") as f:
         total = int(r.headers.get("Content-Length", info.size or 0) or 0)
         done = 0
         while True:
             chunk = r.read(262144)
             if not chunk:
                 break
-            f.write(chunk)
             done += len(chunk)
+            if done > _MAX_ASSET_BYTES:
+                dest.unlink(missing_ok=True)
+                raise ValueError("Update rejected: asset exceeds size limit.")
+            f.write(chunk)
+            hasher.update(chunk)
             if progress and total:
                 progress(done / total)
-    if info.sha256_url:
-        try:
-            expected = _get(info.sha256_url, 30).decode().split()[0].strip().lower()
-        except Exception:  # noqa: BLE001 - TLS already protected the transport
-            expected = ""
-        if expected:
-            got = hashlib.sha256(dest.read_bytes()).hexdigest()
-            if got != expected:
-                dest.unlink(missing_ok=True)
-                raise ValueError("SHA-256 mismatch - download rejected")
+
+    try:
+        expected = _get(info.sha256_url, 30).decode().split()[0].strip().lower()
+    except Exception as exc:  # noqa: BLE001
+        dest.unlink(missing_ok=True)
+        raise ValueError(f"Update rejected: could not read checksum ({exc}).")
+    if not expected:
+        dest.unlink(missing_ok=True)
+        raise ValueError("Update rejected: published checksum is empty.")
+    if hasher.hexdigest() != expected:
+        dest.unlink(missing_ok=True)
+        raise ValueError("SHA-256 mismatch - download rejected.")
     return dest
 
 
@@ -131,7 +182,10 @@ def apply_update(info: UpdateInfo, progress=None) -> None:
     if not can_self_update():
         raise RuntimeError("Self-update is only available in the built exe.")
     target = Path(sys.executable).resolve()
-    tmp = Path(tempfile.gettempdir()) / f"Print2PACS-{info.version}.exe"
+    # Unique, exclusively-created temp dir (0700) rather than a predictable path
+    # another process could pre-plant and have us execute.
+    tmp_dir = Path(tempfile.mkdtemp(prefix="Print2PACS-update-"))
+    tmp = tmp_dir / f"Print2PACS-{info.version}.exe"
     download(info, tmp, progress)
     flags = 0x00000008 | 0x00000200 if os.name == "nt" else 0  # DETACHED | NEW_GROUP
     subprocess.Popen([str(tmp), "apply-update", str(target), str(os.getpid())],

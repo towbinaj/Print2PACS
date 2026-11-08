@@ -1,8 +1,8 @@
 # Print2PACS
 
 Send printed, scanned, or exported images to a DICOM PACS as a new series on an
-**existing study** — a modern, license-free rebuild of the old *DCMPrint2PACS*
-tool, without the virtual printer driver.
+**existing study** — a modern, free and open-source rebuild of the old
+*DCMPrint2PACS* tool, without the virtual printer driver.
 
 Instead of printing to a virtual driver, you **drag images, a PDF, a video, or an
 existing DICOM object into the app**, look up the study by **accession number**,
@@ -204,3 +204,16 @@ with minimal rework.
   preserved (the Step 3 modality menu applies to converted images/video only).
 - Burned-in PHI in the source is **not** removed; review items before sending.
 - Final validation against a production PACS must be done on your own network.
+
+## License
+
+Print2PACS is released under the **GNU General Public License v3.0** — see
+[`LICENSE`](LICENSE). You may use, study, modify and redistribute it under the
+GPL-3.0 terms.
+
+This choice reflects the tool's dependencies: it bundles **FFmpeg** (GPL build,
+for video) and uses **PyMuPDF** (AGPL/commercial dual-licensed, for PDF import).
+If you intend to redistribute Print2PACS — especially in or beyond an
+organization — review FFmpeg's and PyMuPDF's terms (a PyMuPDF commercial license
+may be required for some uses) and keep the corresponding source/notices. This
+note is not legal advice.

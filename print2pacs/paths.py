@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import uuid
 from pathlib import Path
 
 from . import APP_NAME
@@ -84,6 +85,25 @@ def jobs_dir() -> Path:
     d = data_dir() / "jobs"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def new_job_dir() -> Path:
+    """Create and return a unique, exclusively-created per-job workspace.
+
+    The name is a random UUID, never derived from remote/PHI data such as the
+    accession number: that avoids both path traversal (an accession could carry
+    ``\\``, ``/`` or ``..``) and predictable-name collisions between concurrent
+    jobs. Created with ``exist_ok=False`` so two jobs can never share a folder.
+    """
+    base = jobs_dir()
+    for _ in range(8):
+        d = base / f"job_{uuid.uuid4().hex}"
+        try:
+            d.mkdir(parents=False, exist_ok=False)
+            return d
+        except FileExistsError:
+            continue
+    raise OSError("Could not create a unique job directory.")
 
 
 def settings_file() -> Path:
