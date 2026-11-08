@@ -112,6 +112,32 @@ class SettingsDialog(ctk.CTkToplevel):
         e.bind("<FocusOut>", lambda _e: self._save_app())
         r += 1
 
+        ctk.CTkLabel(self.body, text="Max pages / job:").grid(
+            row=r, column=0, sticky="w", pady=6, padx=(4, 8))
+        self.maxpages_var = ctk.StringVar(
+            value=str(self.settings.max_pages_per_job))
+        e = ctk.CTkEntry(self.body, textvariable=self.maxpages_var, width=100)
+        e.grid(row=r, column=1, sticky="w", pady=6)
+        e.bind("<FocusOut>", lambda _e: self._save_app())
+        r += 1
+
+        ctk.CTkLabel(self.body, text="Max video (minutes):").grid(
+            row=r, column=0, sticky="w", pady=6, padx=(4, 8))
+        self.maxvidmin_var = ctk.StringVar(
+            value=str(self.settings.max_video_seconds // 60))
+        e = ctk.CTkEntry(self.body, textvariable=self.maxvidmin_var, width=100)
+        e.grid(row=r, column=1, sticky="w", pady=6)
+        e.bind("<FocusOut>", lambda _e: self._save_app())
+        r += 1
+
+        ctk.CTkLabel(self.body, text="Max video size (MB):").grid(
+            row=r, column=0, sticky="w", pady=6, padx=(4, 8))
+        self.maxvidmb_var = ctk.StringVar(value=str(self.settings.max_video_mb))
+        e = ctk.CTkEntry(self.body, textvariable=self.maxvidmb_var, width=100)
+        e.grid(row=r, column=1, sticky="w", pady=6)
+        e.bind("<FocusOut>", lambda _e: self._save_app())
+        r += 1
+
         ctk.CTkLabel(self.body, text="Debug:").grid(row=r, column=0, sticky="w",
                                                     pady=6, padx=(4, 8))
         dbg = ctk.CTkFrame(self.body, fg_color="transparent")
@@ -178,6 +204,26 @@ class SettingsDialog(ctk.CTkToplevel):
             self.settings.default_series_number = int(self.series_var.get())
         except ValueError:
             self.series_var.set(str(self.settings.default_series_number))
+        if hasattr(self, "maxpages_var"):
+            try:
+                self.settings.max_pages_per_job = max(
+                    1, int(self.maxpages_var.get()))
+            except ValueError:
+                pass
+            self.maxpages_var.set(str(self.settings.max_pages_per_job))
+        if hasattr(self, "maxvidmin_var"):
+            try:
+                self.settings.max_video_seconds = max(
+                    1, int(self.maxvidmin_var.get())) * 60
+            except ValueError:
+                pass
+            self.maxvidmin_var.set(str(self.settings.max_video_seconds // 60))
+        if hasattr(self, "maxvidmb_var"):
+            try:
+                self.settings.max_video_mb = max(1, int(self.maxvidmb_var.get()))
+            except ValueError:
+                pass
+            self.maxvidmb_var.set(str(self.settings.max_video_mb))
         config.save_settings(self.settings)
         self._flash("Saved.")
 

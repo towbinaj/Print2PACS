@@ -22,7 +22,7 @@ except Exception:  # noqa: BLE001
     _HAS_DND = False
 
 from .. import APP_NAME, __version__, config, paths
-from ..engine import dicom_import, reconcile, sc_import, spool, video
+from ..engine import dicom_import, limits, reconcile, sc_import, spool, video
 from ..logging_setup import get_logger, setup as setup_logging
 from ..model import (BODY_PARTS_EXAMINED, CONVERSION_TYPES, SeriesInfo,
                      StudyContext)
@@ -509,6 +509,15 @@ class App(*_APP_BASES):
                      if not sc_import.is_supported(p) and not video.is_video(p)
                      and dicom_import.is_dicom(p)]
 
+        # Preflight the page budget before any heavy rendering (PDF/TIFF counts
+        # are read from metadata, not decoded).
+        incoming_pages = sum(limits.count_pages(p) for p in img_paths)
+        perr = limits.pages_error(len(self.pages) + incoming_pages,
+                                  self.settings.max_pages_per_job)
+        if perr:
+            messagebox.showwarning(APP_NAME, perr)
+            return
+
         def work():
             pages = sc_import.load_many(img_paths, self.settings.pdf_dpi)
             vids = []
@@ -521,14 +530,26 @@ class App(*_APP_BASES):
 
         def done(result):
             pages, vids, dcms = result
+            kept_vids, rejected = [], []
+            for item in vids:
+                meta = item[1]
+                verr = limits.video_duration_error(
+                    getattr(meta, "duration", 0) or 0,
+                    self.settings.max_video_seconds)
+                if verr:
+                    rejected.append(verr)
+                else:
+                    kept_vids.append(item)
             self.pages.extend(pages)
-            self.videos.extend(vids)
+            self.videos.extend(kept_vids)
             self.dicoms.extend(dcms)
             self._refresh_thumbs()
             if skipped:
                 self.count_lbl.configure(
                     text=f"{self._item_count()} item(s)  "
                          f"({skipped} unsupported skipped)")
+            if rejected:
+                messagebox.showwarning(APP_NAME, "\n\n".join(rejected))
 
         def err(exc):
             messagebox.showerror(
@@ -875,6 +896,12 @@ class App(*_APP_BASES):
                      "patient %s / study %s", len(self.dicoms),
                      self.chosen_study.patient_id, self.chosen_study.study_uid)
 
+        perr = limits.pages_error(len(self.pages),
+                                  self.settings.max_pages_per_job)
+        if perr:
+            messagebox.showwarning(APP_NAME, perr)
+            return
+
         # persist defaults for next time (keep the raw selection, incl. Auto)
         self.settings.send_destination = node.name
         self.settings.default_modality = self.modality_var.get()
@@ -921,7 +948,13 @@ class App(*_APP_BASES):
                 vmod = "XC" if auto_mod else forced_mod
                 vi = replace(si, modality=vmod, series_number=snum)
                 snum += 1
-                datasets.append(video.convert_video(vpath, study, vi))
+                vds = video.convert_video(vpath, study, vi)
+                verr = limits.video_size_error(
+                    len(getattr(vds, "PixelData", b"") or b""),
+                    self.settings.max_video_mb)
+                if verr:
+                    raise RuntimeError(verr)
+                datasets.append(vds)
             if dicoms:
                 prog(f"Re-filing {len(dicoms)} DICOM object(s)…")
                 # re-filed objects are grouped into one new series per modality

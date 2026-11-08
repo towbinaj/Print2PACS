@@ -32,6 +32,11 @@ class Settings:
     default_series_description: str = "Print2PACS Import"
     default_conversion_type: str = "WSD"
     default_series_number: int = 9901
+    # Workload limits (preflight): a job over any of these is refused, with a
+    # message, before heavy conversion. Editable here to raise for a real job.
+    max_pages_per_job: int = 300            # images + PDF/TIFF pages
+    max_video_seconds: int = 900            # 15 min per video clip
+    max_video_mb: int = 2048                # ~2 GB per encoded video object
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":
