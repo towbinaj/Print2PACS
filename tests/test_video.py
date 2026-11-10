@@ -170,3 +170,14 @@ def test_ffmpeg_run_is_contained():
     proc = ffmpeg_tools.run(["-version"])
     assert proc.returncode == 0
     assert b"ffmpeg" in proc.stdout.lower()
+
+
+def test_build_cmd_injects_protocol_whitelist(monkeypatch):
+    # R22 regression guard: every ffmpeg command must carry the protocol
+    # whitelist, placed before the first input.
+    monkeypatch.setattr(ffmpeg_tools, "ensure_ffmpeg", lambda: "ffmpeg")
+    cmd = ffmpeg_tools._build_cmd(["-i", "clip.mp4", "-f", "mpegts"])
+    assert "-protocol_whitelist" in cmd
+    wi = cmd.index("-protocol_whitelist")
+    assert cmd[wi + 1] == "file,crypto,data"
+    assert wi < cmd.index("-i")

@@ -33,8 +33,22 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  # v7
         with:
           python-version: '3.14'
-      - name: Bandit (advisory)
-        # Advisory: report Python security findings without failing the build.
+      - name: Bandit (fails on HIGH severity)
+        # Gates on high-severity findings; lower-severity noise does not fail CI.
         run: |
           pip install bandit
-          bandit -r print2pacs -q -ll || true
+          bandit -r print2pacs -q --severity-level high
+
+  secret-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - name: Scan tracked files for real site data
+        # Codifies the manual pre-commit secret scan: fail if real AE titles /
+        # hosts / IP ranges / site names / personal emails appear in the repo.
+        run: |
+          if git grep -nIE "10\.(1|96|149|200|11)\.[0-9]|cchmc|freeland|pacsprod|pacsresearch|towbinaj@|@hotmail|VNA Prod|PACS Prod" -- . ':(exclude)*.sample.json' | grep -viE "example\.(org|com)|127\.0\.0\.1|1\.2\.3|HOSP-A"; then
+            echo "::error::Potential real site data found in tracked files"
+            exit 1
+          fi
+          echo "secret-scan clean"

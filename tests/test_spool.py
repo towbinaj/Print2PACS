@@ -175,3 +175,29 @@ def test_prepare_job_disk_full_raises_and_cleans_up(spool_dir, monkeypatch):
     with pytest.raises(spool.DiskFull):
         spool.prepare_job(_datasets(1), node, CTX)
     assert list(spool_dir.glob("job_*")) == []     # no half-written job left
+
+
+def test_resume_refuses_tampered_spooled_file(spool_dir):
+    received = []
+
+    def store(e):
+        received.append(e.request.AffectedSOPInstanceUID)
+        return 0x0000
+
+    srv, node = _server(store)
+    try:
+        job = spool.prepare_job(_datasets(2), node, CTX)
+        items = spool.read_journal(job)["items"]
+        tampered = job / items[0]["file"]
+        tampered.write_bytes(tampered.read_bytes() + b"x")   # alter after staging
+
+        out = spool.send_job(job, "ME", node)
+        assert len(received) == 1                 # only the intact object was sent
+        assert out.resolved is False
+        states = {it["file"]: it["state"]
+                  for it in spool.read_journal(job)["items"]}
+        assert states[items[0]["file"]] == spool.TAMPERED
+        assert states[items[1]["file"]] == spool.SENT
+        assert any("changed since staging" in e for e in out.store.errors)
+    finally:
+        srv.shutdown()

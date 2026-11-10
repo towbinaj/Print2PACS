@@ -29,6 +29,9 @@ ASSESSMENT_RESPONSE.md
 # Local-only updated remediation plan (shareable, never committed)
 REMEDIATION_PLAN_UPDATED.md
 
+# Local-only handoff notes for the DICOMSecurityCheck harness
+DICOMSecurityCheck-scenarios.md
+
 # Foreign / site config that happens to live in this folder (never commit)
 DCMsettings.json
 

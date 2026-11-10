@@ -42,9 +42,11 @@ SENT = "sent"             # archive returned success
 WARNING = "warning"       # accepted with coercion/discard (stored)
 REJECTED = "rejected"     # archive refused it
 UNCERTAIN = "uncertain"   # sent but acceptance unknown (connection dropped)
+TAMPERED = "tampered"     # spooled file changed/missing since staging -> refused
 
 _DONE = (SENT, WARNING)              # successfully stored
 _RESUMABLE = (PREPARED, REJECTED)    # safe to (re)send automatically
+# TAMPERED is neither done nor resumable: it is held and surfaced, never resent.
 # UNCERTAIN is deliberately NOT resumable: it is held for manual verification.
 
 
@@ -77,7 +79,8 @@ def read_journal(job_dir: Path) -> dict:
 # State queries
 # ---------------------------------------------------------------------------
 def counts(journal: dict) -> dict:
-    c = {PREPARED: 0, SENT: 0, WARNING: 0, REJECTED: 0, UNCERTAIN: 0}
+    c = {PREPARED: 0, SENT: 0, WARNING: 0, REJECTED: 0, UNCERTAIN: 0,
+         TAMPERED: 0}
     for it in journal.get("items", []):
         c[it["state"]] = c.get(it["state"], 0) + 1
     return c
@@ -177,8 +180,27 @@ def send_job(job_dir: Path, my_aetitle: str, node: Node, *, tls_args=None,
     job_dir = Path(job_dir)
     journal = read_journal(job_dir)
     by_name = {it["file"]: it for it in journal["items"]}
-    to_send = [job_dir / it["file"] for it in journal["items"]
-               if it["state"] in _RESUMABLE]
+
+    # Integrity re-check before (re)sending: a spooled file must still match the
+    # SHA-256 recorded when it was staged. A missing/changed file is refused and
+    # held as TAMPERED (never resent), not silently sent. Purely local, no archive.
+    to_send: list[Path] = []
+    integrity_failures: list[str] = []
+    for it in journal["items"]:
+        if it["state"] not in _RESUMABLE:
+            continue
+        f = job_dir / it["file"]
+        expected = it.get("sha256", "")
+        if expected and (not f.exists() or _sha256(f) != expected):
+            it["state"] = TAMPERED
+            it["code"] = "integrity: spooled file missing or changed"
+            integrity_failures.append(it["file"])
+        else:
+            to_send.append(f)
+    if integrity_failures:
+        _write(job_dir, journal)
+        log.warning("Refusing %d spooled object(s) that failed the integrity "
+                    "check", len(integrity_failures))
 
     def on_result(f: Path, state: str, code: str) -> None:
         it = by_name.get(Path(f).name)
@@ -194,6 +216,9 @@ def send_job(job_dir: Path, my_aetitle: str, node: Node, *, tls_args=None,
                              tls_args=tls_args, on_result=on_result)
     else:
         result = scu.StoreResult()
+    for name in integrity_failures:
+        result.errors.append(
+            f"{name}: spooled file changed since staging — not sent.")
     journal["last_attempt"] = _now()
     _write(job_dir, journal)
 

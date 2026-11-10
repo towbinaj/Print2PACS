@@ -59,6 +59,13 @@ def ensure_ffmpeg() -> str:
     return path
 
 
+def _build_cmd(args: list[str]) -> list[str]:
+    """Full ffmpeg argv. The protocol whitelist is an input option, so it must
+    precede the first -i (it is placed up front, before any caller args)."""
+    return [ensure_ffmpeg(), "-hide_banner", "-nostdin", *_PROTOCOL_WHITELIST,
+            *args]
+
+
 def run(args: list[str], *, input_bytes: bytes | None = None,
         timeout: int = 1800) -> subprocess.CompletedProcess:
     """Run ffmpeg with the given args (excluding the executable itself).
@@ -67,9 +74,7 @@ def run(args: list[str], *, input_bytes: bytes | None = None,
     external references), and on Windows a Job Object with a hard memory cap that
     kills ffmpeg and any child processes when the job is closed (cancel/close).
     """
-    # The protocol whitelist is an input option; it must precede the first -i.
-    cmd = [ensure_ffmpeg(), "-hide_banner", "-nostdin", *_PROTOCOL_WHITELIST,
-           *args]
+    cmd = _build_cmd(args)
     log.info("ffmpeg %s", " ".join(a for a in args if not a.startswith(("C:", "/"))))
     if sys.platform == "win32":
         return _run_contained_windows(cmd, input_bytes, timeout)
