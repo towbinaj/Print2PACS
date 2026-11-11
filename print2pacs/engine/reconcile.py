@@ -74,6 +74,27 @@ def _too_broad(value: str) -> bool:
     return (not value) or set(value) <= {"*", "?"}
 
 
+def _has_wildcard(value: str) -> bool:
+    """True if the value contains a DICOM matching wildcard (``*`` or ``?``)."""
+    v = value or ""
+    return ("*" in v) or ("?" in v)
+
+
+def duplicate_accessions(contexts: list[StudyContext]) -> set[str]:
+    """Accession numbers that appear on more than one returned study.
+
+    A collision (e.g. merged facilities, or two issuers) means the accession no
+    longer identifies a single study, so the operator must be warned before
+    picking one (RISK-006).
+    """
+    seen: dict[str, int] = {}
+    for c in contexts:
+        acc = (c.accession or "").strip()
+        if acc:
+            seen[acc] = seen.get(acc, 0) + 1
+    return {acc for acc, n in seen.items() if n > 1}
+
+
 def lookup_studies(my_aetitle: str, node: Node, *, accession: str = "",
                    patient_id: str = "", progress: Progress = _noop,
                    tls_args=None,
@@ -93,6 +114,10 @@ def lookup_studies(my_aetitle: str, node: Node, *, accession: str = "",
         raise ReconcileError(
             "Enter a specific accession number or patient ID "
             "(a wildcard alone is too broad).")
+    if _has_wildcard(accession):
+        raise ReconcileError(
+            "The accession number must be exact — wildcards (* or ?) are not "
+            "allowed in the accession field.")
 
     criteria = {k: "" for k in _RETURN_KEYS}
     if accession:

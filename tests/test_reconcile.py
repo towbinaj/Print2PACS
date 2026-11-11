@@ -84,6 +84,25 @@ def test_wildcard_only_query_is_rejected():
             reconcile.lookup_studies("ME", node, accession=acc, patient_id=pid)
 
 
+def test_wildcard_in_accession_is_rejected():
+    # RISK-006: the accession must be an exact match -- no wildcards allowed.
+    from print2pacs.model import Node
+    node = Node(name="x", aetitle="A", host="127.0.0.1", port=1)
+    for acc in ("A*", "1*", "AC?"):
+        with pytest.raises(reconcile.ReconcileError):
+            reconcile.lookup_studies("ME", node, accession=acc)
+
+
+def test_duplicate_accessions_helper():
+    # RISK-006: flag an accession shared by more than one returned study.
+    from print2pacs.model import StudyContext
+    ctxs = [StudyContext(study_uid="1", accession="ACC1"),
+            StudyContext(study_uid="2", accession="ACC1"),
+            StudyContext(study_uid="3", accession="ACC2")]
+    assert reconcile.duplicate_accessions(ctxs) == {"ACC1"}
+    assert reconcile.duplicate_accessions([]) == set()
+
+
 def test_partial_failure_result_is_rejected():
     def handler(event):
         yield 0xFF00, _match("ACC1", "1.2.3.4")   # a partial match ...

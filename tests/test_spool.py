@@ -177,6 +177,30 @@ def test_prepare_job_disk_full_raises_and_cleans_up(spool_dir, monkeypatch):
     assert list(spool_dir.glob("job_*")) == []     # no half-written job left
 
 
+def test_purge_stale_jobs(spool_dir):
+    # RISK-004: spooled jobs older than the retention window are purged on launch;
+    # recent ones are kept so the recovery dialog can still offer them.
+    import os
+    import time
+
+    old = spool_dir / "job_old"
+    old.mkdir()
+    (old / spool.JOURNAL).write_text("{}", encoding="utf-8")
+    recent = spool_dir / "job_recent"
+    recent.mkdir()
+
+    past = time.time() - 10 * 86400              # 10 days old
+    os.utime(old, (past, past))
+
+    removed = spool.purge_stale_jobs(max_age_days=7)
+    assert removed == 1
+    assert not old.exists()
+    assert recent.exists()
+
+    assert spool.purge_stale_jobs(0) == 0        # disabled -> no-op
+    assert recent.exists()
+
+
 def test_resume_refuses_tampered_spooled_file(spool_dir):
     received = []
 

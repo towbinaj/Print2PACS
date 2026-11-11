@@ -249,6 +249,31 @@ def discard_job(job_dir: Path) -> None:
     shutil.rmtree(Path(job_dir), ignore_errors=True)
 
 
+def purge_stale_jobs(max_age_days: int = 7) -> int:
+    """Delete job folders older than ``max_age_days`` (by mtime); return the count.
+
+    Crash recovery keeps unsent jobs on disk, but stale PHI should not linger
+    indefinitely on the workstation (RISK-004). Recent jobs are left untouched so
+    the recovery dialog can still offer them. ``max_age_days <= 0`` disables it.
+    """
+    if not max_age_days or max_age_days <= 0:
+        return 0
+    import time
+    cutoff = time.time() - max_age_days * 86400
+    removed = 0
+    for d in paths.jobs_dir().glob("job_*"):
+        try:
+            if d.is_dir() and d.stat().st_mtime < cutoff:
+                shutil.rmtree(d, ignore_errors=True)
+                removed += 1
+        except OSError:
+            continue
+    if removed:
+        log.info("Purged %d stale job folder(s) older than %d day(s).",
+                 removed, max_age_days)
+    return removed
+
+
 def unresolved_jobs() -> list[tuple[Path, dict]]:
     """Journaled jobs that are not fully stored (for startup recovery)."""
     out: list[tuple[Path, dict]] = []

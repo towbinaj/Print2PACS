@@ -34,9 +34,12 @@ class Settings:
     default_series_number: int = 9901
     # Workload limits (preflight): a job over any of these is refused, with a
     # message, before heavy conversion. Editable here to raise for a real job.
-    max_pages_per_job: int = 300            # images + PDF/TIFF pages
+    max_pages_per_job: int = 300            # images + PDF/TIFF pages + dcm/video
     max_video_seconds: int = 900            # 15 min per video clip
     max_video_mb: int = 2048                # ~2 GB per encoded video object
+    # Stale spooled jobs (unsent after a crash/cancel) are purged on launch once
+    # older than this, so PHI does not linger on the workstation (0 = never).
+    job_retention_days: int = 7
 
     @classmethod
     def from_dict(cls, d: dict) -> "Settings":

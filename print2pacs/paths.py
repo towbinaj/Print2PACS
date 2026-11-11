@@ -1,8 +1,11 @@
-"""Filesystem locations for the app's portable data folder.
+"""Filesystem locations for the app's per-user data folder.
 
-Settings/destinations/logs live in a ``Print2PACS-data`` folder next to the
-executable (or the repo root when run from source). If that location is not
-writable, fall back to ``%APPDATA%\\Print2PACS``.
+Settings/destinations/logs/jobs live in a per-user, owner-private folder
+(``%LOCALAPPDATA%\\Print2PACS``, falling back to ``%APPDATA%`` then per-user
+temp). They are deliberately NOT stored next to the executable: on a shared
+clinical workstation that folder is readable by every user, so one operator's
+spooled PHI would be exposed to the next (RISK-004). The admin destination
+policy is the only file read from the install dir -- see ``config.policy_path``.
 """
 
 from __future__ import annotations
@@ -61,22 +64,35 @@ _cached_data_dir: Path | None = None
 
 
 def data_dir() -> Path:
-    """The portable data folder, created on first use."""
+    """The per-user data folder, created on first use.
+
+    Per-user, owner-private locations ONLY -- never beside the exe, which on a
+    shared workstation is world-readable (RISK-004). ``%LOCALAPPDATA%`` and
+    ``%APPDATA%`` are protected by per-user NTFS ACLs by default; the temp
+    fallback is also per-user (under the user's profile).
+    """
     global _cached_data_dir
     if _cached_data_dir is not None:
         return _cached_data_dir
 
-    beside = _exe_dir() / _DATA_DIRNAME
-    if _writable(beside):
-        _cached_data_dir = beside
-        return beside
+    # Running from source (dev): keep the repo-local data folder for convenience.
+    # This path is never the deployed one, so the shared-workstation risk below
+    # does not apply.
+    if not _frozen():
+        beside = _exe_dir() / _DATA_DIRNAME
+        if _writable(beside):
+            _cached_data_dir = beside
+            return beside
 
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        fallback = Path(appdata) / APP_NAME
-        if _writable(fallback):
-            _cached_data_dir = fallback
-            return fallback
+    # Frozen (deployed) build: per-user, owner-private locations ONLY -- never
+    # beside the exe, which on a shared workstation is world-readable (RISK-004).
+    for env in ("LOCALAPPDATA", "APPDATA"):
+        base = os.environ.get(env)
+        if base:
+            cand = Path(base) / APP_NAME
+            if _writable(cand):
+                _cached_data_dir = cand
+                return cand
 
     tmp = Path(tempfile.gettempdir()) / APP_NAME
     tmp.mkdir(parents=True, exist_ok=True)

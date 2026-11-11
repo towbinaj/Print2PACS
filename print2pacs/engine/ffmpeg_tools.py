@@ -59,6 +59,23 @@ def ensure_ffmpeg() -> str:
     return path
 
 
+def _loggable_args(args: list[str]) -> list[str]:
+    """ffmpeg args with any filesystem path replaced by ``<path>``.
+
+    A source filename can carry PHI (patient name / MRN), so it must never reach
+    the log. The old filter only hid ``C:``/``/`` paths, leaking ``D:\\``, UNC
+    (``\\\\server\\...``) and relative paths (RISK-004). This hides any argument
+    that looks like a path: a separator, or a drive-letter prefix.
+    """
+    out: list[str] = []
+    for a in args:
+        if ("\\" in a) or ("/" in a) or (len(a) >= 2 and a[1] == ":"):
+            out.append("<path>")
+        else:
+            out.append(a)
+    return out
+
+
 def _build_cmd(args: list[str]) -> list[str]:
     """Full ffmpeg argv. The protocol whitelist is an input option, so it must
     precede the first -i (it is placed up front, before any caller args)."""
@@ -75,7 +92,7 @@ def run(args: list[str], *, input_bytes: bytes | None = None,
     kills ffmpeg and any child processes when the job is closed (cancel/close).
     """
     cmd = _build_cmd(args)
-    log.info("ffmpeg %s", " ".join(a for a in args if not a.startswith(("C:", "/"))))
+    log.info("ffmpeg %s", " ".join(_loggable_args(args)))
     if sys.platform == "win32":
         return _run_contained_windows(cmd, input_bytes, timeout)
     return subprocess.run(

@@ -172,6 +172,21 @@ def test_ffmpeg_run_is_contained():
     assert b"ffmpeg" in proc.stdout.lower()
 
 
+def test_loggable_args_redacts_all_paths():
+    # RISK-004: any filesystem path (any drive, UNC, or relative) is replaced by
+    # <path> before the ffmpeg command is logged, so a PHI-bearing filename never
+    # reaches print2pacs.log. The old filter only hid C:\ and / paths.
+    red = ffmpeg_tools._loggable_args(
+        ["-i", r"D:\Patients\DOE^JANE_MRN123.mp4", "-f", "mpegts",
+         r"\\server\share\SMITH^BOB.ts", r"C:\x\y.mp4", "-an"])
+    assert not any("DOE^JANE" in a for a in red)
+    assert not any("SMITH^BOB" in a for a in red)
+    assert not any(a.startswith(("C:", "D:")) or "\\" in a for a in red)
+    assert "<path>" in red
+    # non-path flags/values are preserved
+    assert "-i" in red and "-f" in red and "mpegts" in red and "-an" in red
+
+
 def test_build_cmd_injects_protocol_whitelist(monkeypatch):
     # R22 regression guard: every ffmpeg command must carry the protocol
     # whitelist, placed before the first input.

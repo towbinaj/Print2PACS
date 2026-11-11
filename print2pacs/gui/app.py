@@ -82,14 +82,16 @@ class App(*_APP_BASES):
         self.chosen_study: StudyContext | None = None
         self._step = 1
         self._sending = False
+        # Re-entrancy guards: pressing <Return> / Test repeatedly must not stack
+        # up concurrent C-FIND / C-ECHO associations against PACS (RISK-005).
+        self._looking_up = False
+        self._testing_conn = False
         # Monotonic token so an older, slower C-FIND callback can never replace
         # the results/selection from a newer lookup (stale-result suppression).
         self._lookup_gen = 0
         # Name of the PACS the current study was looked up on (for the
         # query->send namespace guard).
         self._lookup_query_name = ""
-        # Fingerprint the re-file confirmation was bound to (invalidated on change).
-        self._confirmed_fp = ""
 
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -276,14 +278,6 @@ class App(*_APP_BASES):
         self.send_menu = ctk.CTkOptionMenu(self.confirm_box, values=["(none)"],
                                            command=lambda _v: None)
         self.send_menu.grid(row=1, column=1, sticky="w", padx=6, pady=(0, 12))
-
-        # Shown only when re-filing existing DICOM objects (see _refresh_confirm):
-        # a deliberate guard against sending the wrong patient's material.
-        self.dicom_confirm_var = ctk.BooleanVar(value=False)
-        self.dicom_confirm_chk = ctk.CTkCheckBox(
-            self.confirm_box, variable=self.dicom_confirm_var,
-            command=self._on_dicom_confirm,
-            text="I confirm this material belongs to this patient")
 
         series = ctk.CTkFrame(f)
         series.grid(row=1, column=0, sticky="new", pady=(0, 10))
@@ -552,10 +546,13 @@ class App(*_APP_BASES):
                      if not sc_import.is_supported(p) and not video.is_video(p)
                      and dicom_import.is_dicom(p)]
 
-        # Preflight the page budget before any heavy rendering (PDF/TIFF counts
-        # are read from metadata, not decoded).
-        incoming_pages = sum(limits.count_pages(p) for p in img_paths)
-        perr = limits.pages_error(len(self.pages) + incoming_pages,
+        # Preflight the instance budget before any heavy rendering (PDF/TIFF
+        # counts are read from metadata, not decoded). Count every object type --
+        # dropped .dcm files and videos too, not just image pages (RISK-005).
+        incoming = (sum(limits.count_pages(p) for p in img_paths)
+                    + len(dcm_paths) + len(vid_paths))
+        current = len(self.pages) + len(self.dicoms) + len(self.videos)
+        perr = limits.pages_error(current + incoming,
                                   self.settings.max_pages_per_job)
         if perr:
             messagebox.showwarning(APP_NAME, perr)
@@ -762,10 +759,13 @@ class App(*_APP_BASES):
         SettingsDialog(self, on_changed=self._refresh_dest_menus)
 
     def _test_connection(self):
+        if self._testing_conn:
+            return                            # one C-ECHO at a time (RISK-005)
         node = self._query_node()
         if not node:
             messagebox.showinfo(APP_NAME, "Add a PACS destination first.")
             return
+        self._testing_conn = True
         self.find_status.configure(text="Testing connection…")
 
         def work():
@@ -773,14 +773,21 @@ class App(*_APP_BASES):
                               tls_args=scu.tls_args_for(node))
 
         def done(res):
+            self._testing_conn = False
             self.find_status.configure(text=res.message)
             if not res.success:
                 messagebox.showwarning(APP_NAME, res.message)
 
-        run_threaded(self, work, done,
-                     lambda e: self.find_status.configure(text=str(e)))
+        def err(exc):
+            self._testing_conn = False
+            self.find_status.configure(text=str(exc))
+
+        run_threaded(self, work, done, err)
 
     def _lookup(self):
+        if self._looking_up:
+            return                            # one C-FIND at a time (RISK-005):
+                                              # rapid <Return> must not stack queries
         node = self._query_node()
         if not node:
             messagebox.showinfo(APP_NAME, "Add a PACS destination first.")
@@ -801,6 +808,7 @@ class App(*_APP_BASES):
         self._clear_results()
         self._lookup_gen += 1
         gen = self._lookup_gen
+        self._looking_up = True
         self.lookup_btn.configure(state="disabled")
 
         def work():
@@ -809,16 +817,18 @@ class App(*_APP_BASES):
                 tls_args=scu.tls_args_for(node))
 
         def done(studies):
+            self._looking_up = False
+            self.lookup_btn.configure(state="normal")
             if gen != self._lookup_gen:
                 return                       # a newer lookup superseded this one
-            self.lookup_btn.configure(state="normal")
             self.studies = studies
             self._render_results()
 
         def err(exc):
+            self._looking_up = False
+            self.lookup_btn.configure(state="normal")
             if gen != self._lookup_gen:
                 return
-            self.lookup_btn.configure(state="normal")
             self.find_status.configure(text=str(exc))
             self._clear_results()
 
@@ -837,12 +847,25 @@ class App(*_APP_BASES):
         self.find_status.configure(
             text=f"{len(self.studies)} match(es). Select the correct study "
                  "to continue.")
+        # Warn if an accession is shared by more than one returned study: it no
+        # longer uniquely identifies a study, so the operator must pick carefully.
+        dups = reconcile.duplicate_accessions(self.studies)
+        row0 = 0
+        if dups:
+            warn = ctk.CTkLabel(
+                self.results, anchor="w", justify="left", wraplength=780,
+                text_color=theme.DANGER if hasattr(theme, "DANGER") else "#c0392b",
+                text=("⚠ Accession " + ", ".join(sorted(dups)) + " is on more than "
+                      "one study below. Check patient name, DOB and sex before "
+                      "selecting."))
+            warn.grid(row=0, column=0, sticky="ew", pady=(2, 6), padx=2)
+            row0 = 1
         # No pre-selection: the operator must deliberately choose a study. This
         # prevents silently defaulting to the first of several matches.
         self._study_var = ctk.IntVar(value=-1)
         for i, s in enumerate(self.studies):
             card = ctk.CTkFrame(self.results)
-            card.grid(row=i, column=0, sticky="ew", pady=4, padx=2)
+            card.grid(row=row0 + i, column=0, sticky="ew", pady=4, padx=2)
             card.grid_columnconfigure(1, weight=1)
             ctk.CTkRadioButton(
                 card, text="", variable=self._study_var, value=i,
@@ -895,17 +918,6 @@ class App(*_APP_BASES):
             f"{s.study_date or '—'}\n"
             f"To send:  {', '.join(bits) or 'nothing'}{note}"))
 
-        # Re-filed DICOM carries its own pixels/overlays (which header re-stamping
-        # cannot change), so require an explicit per-send confirmation.
-        if self.dicoms:
-            self.dicom_confirm_var.set(False)
-            self.dicom_confirm_chk.configure(
-                text=f"I confirm these DICOM objects belong to {name}")
-            self.dicom_confirm_chk.grid(row=2, column=0, columnspan=2,
-                                        sticky="w", padx=14, pady=(0, 12))
-        else:
-            self.dicom_confirm_chk.grid_remove()
-
     def _series_info(self) -> SeriesInfo:
         conv = self.conv_var.get().split(" - ")[0].strip()
         sel = self.modality_var.get().strip()
@@ -952,13 +964,6 @@ class App(*_APP_BASES):
             operator=operator,
             confirmed_at=datetime.now().isoformat(timespec="seconds"))
 
-    def _on_dicom_confirm(self):
-        # Bind the confirmation to the current intent; a later change to the
-        # study, destination, or items invalidates it (re-checked at send).
-        self._confirmed_fp = (
-            self._build_intent(self._send_node()).identity_fingerprint
-            if self.dicom_confirm_var.get() else "")
-
     def _send(self):
         if self._sending:
             return
@@ -983,23 +988,6 @@ class App(*_APP_BASES):
                 + "\n".join(f"• {p}" for p in problems))
             return
 
-        if self.dicoms and not self.dicom_confirm_var.get():
-            messagebox.showwarning(
-                APP_NAME, "Please confirm the dropped DICOM objects belong to "
-                "this patient before sending.")
-            return
-        if self.dicoms and self._confirmed_fp != intent.identity_fingerprint:
-            # Study, destination, or items changed after the confirmation.
-            self.dicom_confirm_var.set(False)
-            self._confirmed_fp = ""
-            messagebox.showwarning(
-                APP_NAME, "The study, destination, or items changed since you "
-                "confirmed. Please re-confirm before sending.")
-            return
-        if self.dicoms:
-            log.info("Operator confirmed %d re-filed DICOM object(s) belong to "
-                     "the selected study.", len(self.dicoms))
-
         # Query->send namespace guard: the found StudyInstanceUID only means the
         # right thing if the send target shares the query node's namespace.
         qn = self._lookup_query_name
@@ -1020,8 +1008,9 @@ class App(*_APP_BASES):
                 return
             # allowed is True -> an approved pair; proceed
 
-        perr = limits.pages_error(len(self.pages),
-                                  self.settings.max_pages_per_job)
+        perr = limits.pages_error(
+            len(self.pages) + len(self.dicoms) + len(self.videos),
+            self.settings.max_pages_per_job)
         if perr:
             messagebox.showwarning(APP_NAME, perr)
             return
@@ -1239,6 +1228,12 @@ class App(*_APP_BASES):
 
     # ---- startup recovery of interrupted sends -------------------------------
     def _check_recovery(self):
+        # Purge PHI-bearing jobs that are too old to still be a real recovery
+        # candidate before we look for any to offer (RISK-004).
+        try:
+            spool.purge_stale_jobs(self.settings.job_retention_days)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             jobs = spool.unresolved_jobs()
         except Exception:  # noqa: BLE001

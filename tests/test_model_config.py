@@ -77,6 +77,13 @@ def test_send_intent_validate_and_fingerprint():
     assert any("Study Instance UID" in p for p in probs)
     assert any("name" in p for p in probs)
 
+    # RISK-006: a send with no accession is blocked (accession is required).
+    no_acc = SendIntent.build(
+        StudyContext(study_uid="1.2.3.4", patient_id="MRN1",
+                     patient_name="DOE^J", accession=""),
+        query_source="Q", destination="D", content_signature="s")
+    assert any("Accession" in p for p in no_acc.validate())
+
     # Destination or content change -> different fingerprint (invalidates confirm)
     assert (SendIntent.build(ctx, query_source="Q", destination="D2",
                              content_signature="sig").identity_fingerprint
@@ -109,6 +116,30 @@ def test_destination_policy(tmp_path, monkeypatch):
     assert {n.name for n in config.load_destinations()} == {"VNA", "QR"}
     assert config.pair_allowed("QR", "VNA") is True       # approved
     assert config.pair_allowed("QR", "OTHER") is False    # not approved -> block
+
+
+def test_frozen_data_dir_is_per_user_never_beside_exe(tmp_path, monkeypatch):
+    # RISK-004: in the deployed (frozen) build, user data must live in a per-user,
+    # owner-private folder, never beside the exe (world-readable on a shared
+    # clinical workstation).
+    monkeypatch.setattr(paths, "_cached_data_dir", None)
+    monkeypatch.setattr(paths, "_frozen", lambda: True)          # simulate the exe
+    local = tmp_path / "localappdata"
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    # Even if an exe-adjacent folder would be writable, it must NOT be chosen.
+    monkeypatch.setattr(paths, "_exe_dir", lambda: tmp_path / "install")
+
+    d = paths.data_dir()
+    assert d == local / "Print2PACS"
+    assert (tmp_path / "install") not in d.parents
+
+
+def test_source_data_dir_stays_repo_local(tmp_path, monkeypatch):
+    # Running from source keeps the repo-local data folder (dev convenience).
+    monkeypatch.setattr(paths, "_cached_data_dir", None)
+    monkeypatch.setattr(paths, "_frozen", lambda: False)
+    monkeypatch.setattr(paths, "_exe_dir", lambda: tmp_path / "repo")
+    assert paths.data_dir() == tmp_path / "repo" / "Print2PACS-data"
 
 
 def test_policy_path_uses_install_dir_not_meipass(tmp_path, monkeypatch):

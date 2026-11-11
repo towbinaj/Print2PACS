@@ -169,6 +169,8 @@ class SendIntent:
             problems.append("Patient name is missing.")
         if not is_valid_uid(self.study_uid):
             problems.append("Study Instance UID is missing or malformed.")
+        if not self.accession:
+            problems.append("Accession number is missing.")
         return problems
 
     @property

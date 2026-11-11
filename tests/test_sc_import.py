@@ -19,6 +19,23 @@ def _page(mode, size, color):
     return sc_import.SourcePage(Image.new(mode, size, color), f"{mode}.png")
 
 
+def test_oversized_page_is_refused(tmp_path, monkeypatch):
+    # RISK-005: a page over the per-page pixel ceiling is refused up front,
+    # before its pixels are decoded, so it cannot exhaust workstation RAM.
+    import pytest
+    monkeypatch.setattr(sc_import, "MAX_IMAGE_PIXELS", 16)   # tiny cap for the test
+    p = tmp_path / "big.png"
+    Image.new("L", (8, 8), 0).save(p)                       # 64 px > 16
+    with pytest.raises(sc_import.SourceTooLarge):
+        sc_import.load_pages(p)
+
+
+def test_normal_page_under_cap_loads(tmp_path):
+    p = tmp_path / "ok.png"
+    Image.new("L", (8, 8), 0).save(p)
+    assert len(sc_import.load_pages(p)) == 1                # well under 50 MP
+
+
 def test_supported_extensions():
     assert sc_import.is_supported("a.JPG")
     assert sc_import.is_supported("b.pdf")

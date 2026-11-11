@@ -137,7 +137,10 @@ def load_dicom(path: str | Path) -> DicomSource:
     """Read just enough metadata to show a dropped DICOM in the review list."""
     p = Path(path)
     try:
-        ds = dcmread(str(p), force=True, stop_before_pixels=True)
+        # defer_size: a bogus element length in a malformed/truncated file must
+        # not make pydicom eagerly allocate a huge buffer during the preview read
+        # (RISK-005). Large values are read lazily; we only touch small metadata.
+        ds = dcmread(str(p), force=True, stop_before_pixels=True, defer_size=1024)
     except Exception as exc:  # noqa: BLE001
         raise NotDicom(f"{p.name}: not a readable DICOM object ({exc}).") from exc
     sop = str(getattr(ds, "SOPClassUID", "") or "")

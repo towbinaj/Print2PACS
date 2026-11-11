@@ -35,6 +35,12 @@ SUPPORTED_EXTS = RASTER_EXTS | PDF_EXTS
 # Default DPI for rasterizing PDF pages.
 PDF_RENDER_DPI = 200
 
+# Per-page pixel ceiling. Guards against decompression bombs and accidental
+# poster-size / ultra-high-DPI pages that would exhaust workstation RAM before a
+# single page is even stored (RISK-005). Checked from header/geometry, so an
+# oversized page is refused without first decoding or rendering it.
+MAX_IMAGE_PIXELS = 50_000_000      # ~50 megapixels per page
+
 # Suggested DICOM Modality per source type, used by the "Auto (by type)" default.
 # Documents/scans -> OT; photographs -> XC (External-camera Photography).
 MODALITY_BY_EXT = {
@@ -64,6 +70,18 @@ def group_pages_by_modality(
 
 class UnsupportedSource(Exception):
     pass
+
+
+class SourceTooLarge(UnsupportedSource):
+    """A single page/image exceeds the per-page pixel ceiling (RISK-005)."""
+
+
+def _check_pixels(width: int, height: int, source: str) -> None:
+    if width * height > MAX_IMAGE_PIXELS:
+        raise SourceTooLarge(
+            f"{source}: {width}x{height} (~{width * height // 1_000_000} MP) "
+            f"exceeds the {MAX_IMAGE_PIXELS // 1_000_000} MP per-page limit. "
+            "Reduce the image resolution or the PDF render DPI.")
 
 
 @dataclass
@@ -100,6 +118,8 @@ def _load_raster_pages(path: Path) -> list[SourcePage]:
         for i in range(n):
             if n > 1:
                 im.seek(i)
+            # Reject an oversized frame from its header, before decoding pixels.
+            _check_pixels(im.width, im.height, path.name)
             frame = im.convert(im.mode)  # detach a copy from the file handle
             frame.load()
             # Apply EXIF orientation so camera/phone photos are stored upright.
@@ -115,6 +135,11 @@ def _load_pdf_pages(path: Path, dpi: int) -> list[SourcePage]:
     doc = fitz.open(str(path))
     try:
         for i, page in enumerate(doc):
+            # Reject an oversized rendered page from its geometry + DPI, before
+            # allocating the pixmap (a poster page at high DPI can be huge).
+            scale = dpi / 72.0
+            _check_pixels(int(page.rect.width * scale),
+                          int(page.rect.height * scale), f"{path.name} p{i + 1}")
             pix = page.get_pixmap(dpi=dpi, colorspace=fitz.csRGB, alpha=False)
             img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
             pages.append(SourcePage(image=img, source=path.name, page_index=i))
