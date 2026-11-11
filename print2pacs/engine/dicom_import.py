@@ -109,6 +109,10 @@ class DicomSource:
     description: str          # original SeriesDescription (for display)
     nframes: int = 1
     content_sha256: str = ""  # hash of the file bytes when it was added
+    # The object's OWN patient identity as it arrived (before re-stamping), used
+    # only to warn if it disagrees with the selected study (identity_mismatches).
+    src_birth_date: str = ""
+    src_sex: str = ""
 
     @property
     def sop_class_name(self) -> str:
@@ -157,7 +161,58 @@ def load_dicom(path: str | Path) -> DicomSource:
         description=str(getattr(ds, "SeriesDescription", "") or ""),
         nframes=nframes,
         content_sha256=_sha256(p),
+        src_birth_date=str(getattr(ds, "PatientBirthDate", "") or ""),
+        src_sex=str(getattr(ds, "PatientSex", "") or ""),
     )
+
+
+# ---------------------------------------------------------------------------
+# Identity cross-check (warn on a wrong-study drop)
+# ---------------------------------------------------------------------------
+@dataclass
+class IdentityMismatch:
+    """A field on a dropped object that disagrees with the target study."""
+
+    field: str            # "Date of birth" / "Sex"
+    source_value: str     # value the dropped object arrived with
+    target_value: str     # value of the selected study
+
+
+def _norm_dob(v: str) -> str:
+    return "".join(ch for ch in (v or "") if ch.isdigit())
+
+
+def _norm_sex(v: str) -> str:
+    return (v or "").strip()[:1].upper()
+
+
+def identity_mismatches(sources, context) -> list[IdentityMismatch]:
+    """Distinct DOB/Sex disagreements between dropped objects and the study.
+
+    Re-filing assumes the dropped object is the SAME patient; a differing date of
+    birth or sex is a strong signal it is not (e.g. a wrong-study drop), so the
+    operator is warned before it is attached (RISK-006 replacement safety stop).
+    Only fields that BOTH sides actually carry are compared -- a blank on either
+    side is no signal. MRN/name are intentionally not compared (they legitimately
+    differ across institutions / by formatting).
+    """
+    out: list[IdentityMismatch] = []
+    seen: set[tuple[str, str, str]] = set()
+    t_dob, t_sex = _norm_dob(context.birth_date), _norm_sex(context.sex)
+    for s in sources:
+        checks = (
+            ("Date of birth", _norm_dob(s.src_birth_date), t_dob,
+             s.src_birth_date, context.birth_date),
+            ("Sex", _norm_sex(s.src_sex), t_sex, s.src_sex, context.sex),
+        )
+        for field, sv, tv, raw_s, raw_t in checks:
+            if sv and tv and sv != tv:
+                key = (field, sv, tv)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(IdentityMismatch(field, raw_s or "—",
+                                                raw_t or "—"))
+    return out
 
 
 # ---------------------------------------------------------------------------

@@ -174,6 +174,41 @@ def test_restamp_strip_private_opt_in(tmp_path):
     assert not any(e.tag.is_private for e in ds)
 
 
+def test_identity_mismatch_flags_dob_and_sex(tmp_path):
+    # RISK-006 safety stop: a dropped object whose own DOB/Sex disagree with the
+    # target study is flagged (TARGET is DOB 19900202 / F; source is 19500101 / M).
+    p, _ = _make_source(tmp_path / "s.dcm")
+    src = dicom_import.load_dicom(p)
+    assert src.src_birth_date == "19500101" and src.src_sex == "M"
+    mm = dicom_import.identity_mismatches([src], TARGET)
+    assert {m.field for m in mm} == {"Date of birth", "Sex"}
+
+
+def test_identity_mismatch_silent_when_matching(tmp_path):
+    p, _ = _make_source(tmp_path / "s.dcm")
+    src = dicom_import.load_dicom(p)
+    same = StudyContext(study_uid="1.2.3.4.5", patient_id="X",
+                        patient_name="A^B", birth_date="19500101", sex="M")
+    assert dicom_import.identity_mismatches([src], same) == []
+
+
+def test_identity_mismatch_skips_blank_fields_and_dedups(tmp_path):
+    from dataclasses import replace
+    p, _ = _make_source(tmp_path / "s.dcm")
+    base = dicom_import.load_dicom(p)
+    # Source has no DOB; target has no sex -> neither field has a signal on both
+    # sides, so nothing is flagged.
+    src = replace(base, src_birth_date="", src_sex="M")
+    ctx = StudyContext(study_uid="1.2.3.4.5", birth_date="19900202", sex="")
+    assert dicom_import.identity_mismatches([src], ctx) == []
+    # Two sources with the same Sex mismatch collapse to a single warning.
+    two = [replace(base, src_birth_date="", src_sex="M"),
+           replace(base, src_birth_date="", src_sex="M")]
+    ctx2 = StudyContext(study_uid="1.2.3.4.5", sex="F")
+    mm = dicom_import.identity_mismatches(two, ctx2)
+    assert len(mm) == 1 and mm[0].field == "Sex"
+
+
 def test_restamp_zeros_polyglot_preamble(tmp_path):
     # Source has an MZ (PE) header in its preamble; the re-filed object must not.
     p, _ = _make_source(tmp_path / "evil.dcm", polyglot=True)

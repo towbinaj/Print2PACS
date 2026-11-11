@@ -988,6 +988,24 @@ class App(*_APP_BASES):
                 + "\n".join(f"• {p}" for p in problems))
             return
 
+        # Identity cross-check: a dropped DICOM whose own DOB/Sex disagrees with
+        # the selected study is likely a wrong-study drop. Warn (with override)
+        # only when there is a real mismatch; stay silent when they agree.
+        if self.dicoms and self.chosen_study:
+            mm = dicom_import.identity_mismatches(self.dicoms, self.chosen_study)
+            if mm:
+                lines = "\n".join(
+                    f"• {m.field}:  dropped “{m.source_value}”  ≠  "
+                    f"study “{m.target_value}”" for m in mm)
+                if not messagebox.askyesno(
+                        APP_NAME,
+                        "The dropped DICOM object(s) do NOT match the selected "
+                        f"patient:\n\n{lines}\n\nThis usually means the wrong "
+                        "study was selected. Re-file onto "
+                        f"{self.chosen_study.patient_name.replace('^', ', ')} "
+                        "anyway?", icon="warning", default="no"):
+                    return
+
         # Query->send namespace guard: the found StudyInstanceUID only means the
         # right thing if the send target shares the query node's namespace.
         qn = self._lookup_query_name
