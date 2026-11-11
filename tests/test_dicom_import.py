@@ -125,6 +125,55 @@ def test_restamp_morphs_identity_keeps_modality_and_sop_class(tmp_path):
     assert ds.file_meta.MediaStorageSOPInstanceUID == ds.SOPInstanceUID
 
 
+def test_restamp_declares_utf8_and_preserves_target_name(tmp_path):
+    # RISK-001: a Latin-1 (ISO_IR 100) source re-filed onto a target whose name
+    # has characters outside Latin-1 must not corrupt the name to '?'. restamp()
+    # declares ISO_IR 192 (UTF-8), so the target name survives a save+reload.
+    p, _ = _make_source(tmp_path / "latin1.dcm")       # source is ISO_IR 100
+    target = StudyContext(
+        patient_id="NEW-001", patient_name="KOWALSKI^ŁUKASZ",
+        birth_date="19900202", sex="M", study_uid="1.2.3.4.5",
+        accession="NEWACC")
+    [ds] = dicom_import.convert_dicoms([dicom_import.load_dicom(p)], target, SI)
+    assert ds.SpecificCharacterSet == "ISO_IR 192"
+
+    out = tmp_path / "out.dcm"
+    ds.save_as(str(out), enforce_file_format=True)
+    re = dcmread(str(out))
+    assert str(re.PatientName) == "KOWALSKI^ŁUKASZ"    # not "KOWALSKI^?UKASZ"
+
+
+def test_restamp_retains_demographics_and_private_by_design(tmp_path):
+    # RISK-001 (accepted design): outside demographics/clinical alerts and private
+    # tags are the SAME patient's and are KEPT; only identity is normalized.
+    p, _ = _make_source(tmp_path / "src.dcm", with_private=True)
+    src = dcmread(str(p))
+    src.PatientAge = "066Y"
+    src.PatientWeight = "80.0"
+    src.Allergies = "PENICILLIN"
+    src.MedicalAlerts = "PACEMAKER"
+    src.save_as(str(p), enforce_file_format=True)
+
+    [ds] = dicom_import.convert_dicoms([dicom_import.load_dicom(p)], TARGET, SI)
+    # clinical/demographic context retained
+    assert ds.PatientAge == "066Y"
+    assert ds.PatientWeight == "80.0"
+    assert ds.Allergies == "PENICILLIN"
+    assert ds.MedicalAlerts == "PACEMAKER"
+    # private tags retained by default (strip_private defaults False)
+    assert ds.private_block(0x000b, "ACME 1.0")[0x01].value == "sekret-blob"
+    # ...but identity is still normalized to the target
+    assert ds.PatientID == "NEW-001"
+    assert str(ds.PatientName) == "NEW^PATIENT"
+
+
+def test_restamp_strip_private_opt_in(tmp_path):
+    p, _ = _make_source(tmp_path / "src.dcm", with_private=True)
+    [ds] = dicom_import.convert_dicoms(
+        [dicom_import.load_dicom(p)], TARGET, SI, strip_private=True)
+    assert not any(e.tag.is_private for e in ds)
+
+
 def test_restamp_zeros_polyglot_preamble(tmp_path):
     # Source has an MZ (PE) header in its preamble; the re-filed object must not.
     p, _ = _make_source(tmp_path / "evil.dcm", polyglot=True)

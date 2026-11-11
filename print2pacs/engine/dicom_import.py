@@ -26,6 +26,17 @@ Identity consistency (why the re-filed object is unambiguously the target patien
     (referenced/source image, study, series, PPS) are stripped because they would
     dangle on the target study; invalidated digital signatures are removed too.
     Clinical content (pixels, report text, measurements) is left intact.
+  * Design decision -- demographics/alerts and private tags are RETAINED by
+    design. This tool adds media to an *existing* study for the *same* patient;
+    a dropped outside object is that same patient, and we only normalize the
+    identity (name/MRN/issuer) to this site's values. So outside clinical/
+    demographic attributes (PatientAge, PatientSize, PatientWeight, Allergies,
+    MedicalAlerts, PregnancyStatus, ...) are legitimately that patient's and are
+    deliberately KEPT -- losing them would be the real harm. Private/vendor tags
+    are likewise kept by default (optional ``strip_private`` is available). The
+    wrong-patient case is guarded at study *selection* (confirmation + pinned
+    banner), not by deleting clinical fields here. Do NOT "harden" this by
+    stripping demographics.
   * The on-disk file is hashed when it is added; if it changes before the send,
     the re-file is refused (the reviewed object must be the one that is sent).
 
@@ -223,6 +234,13 @@ def restamp(ds: FileDataset, context: StudyContext, series_info: SeriesInfo, *,
     if not context.study_uid:
         raise ValueError("StudyContext.study_uid is required (reconcile first).")
     _ensure_valid(ds, "dropped object")
+
+    # Declare UTF-8 for the whole dataset. The source was decoded on read using
+    # its own SpecificCharacterSet, so the in-memory strings are already correct;
+    # writing under ISO_IR 192 re-encodes them losslessly. Without this, a target
+    # name with characters outside the source's charset (e.g. a Latin-1 source,
+    # UTF-8 target name) would be silently corrupted to '?' on disk.
+    ds.SpecificCharacterSet = "ISO_IR 192"
 
     # --- Patient Module (overwrite to match the archived study) ---
     ds.PatientName = context.patient_name or ""
