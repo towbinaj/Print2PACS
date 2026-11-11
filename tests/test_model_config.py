@@ -109,3 +109,28 @@ def test_destination_policy(tmp_path, monkeypatch):
     assert {n.name for n in config.load_destinations()} == {"VNA", "QR"}
     assert config.pair_allowed("QR", "VNA") is True       # approved
     assert config.pair_allowed("QR", "OTHER") is False    # not approved -> block
+
+
+def test_policy_path_uses_install_dir_not_meipass(tmp_path, monkeypatch):
+    # RISK-002: in the packaged (frozen) exe the admin policy must be read from
+    # the folder that holds Print2PACS.exe, NOT the ephemeral _MEIPASS extraction
+    # dir -- otherwise a policy IT drops next to the exe is silently ignored and
+    # all destinations stay unlocked.
+    install = tmp_path / "install"
+    meipass = tmp_path / "_MEI123456"
+    install.mkdir()
+    meipass.mkdir()
+    monkeypatch.setattr(paths.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(paths.sys, "_MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr(paths.sys, "executable",
+                        str(install / "Print2PACS.exe"), raising=False)
+
+    # The bundle dir and the install dir are genuinely different when frozen.
+    assert paths.resource_dir() == meipass
+    assert paths.exe_dir() == install.resolve()
+    assert config.policy_path() == install.resolve() / config.POLICY_FILENAME
+
+    # A policy dropped beside the exe is now actually found.
+    (install / config.POLICY_FILENAME).write_text(
+        '{"destinations": []}', encoding="utf-8")
+    assert config.load_destination_policy() == {"destinations": []}

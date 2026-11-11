@@ -202,9 +202,18 @@ def c_find(my_aetitle: str, node: Node, identifier: Dataset,
 # C-STORE
 # ---------------------------------------------------------------------------
 def _contexts_for_files(files: list[Path]) -> list:
-    """Propose exactly the SOP class(es) + transfer syntax(es) in the files."""
-    from pydicom.uid import ExplicitVRLittleEndian
-    contexts: dict[tuple[str, str], object] = {}
+    """Propose the SOP class(es) + transfer syntax(es) present in the files.
+
+    For an uncompressed object (Explicit or Implicit VR Little Endian) we propose
+    BOTH uncompressed syntaxes for that SOP class, so an SCP that accepts only the
+    other uncompressed syntax still negotiates a context (RISK-007). The two are
+    losslessly interconvertible and pynetdicom re-encodes on send. Compressed
+    syntaxes (RLE, JPEG, H.264, ...) are proposed exactly as stored: the pixel
+    data is encoded for that one syntax and cannot be re-expressed here.
+    """
+    from pydicom.uid import ExplicitVRLittleEndian, ImplicitVRLittleEndian
+    uncompressed = {str(ExplicitVRLittleEndian), str(ImplicitVRLittleEndian)}
+    syntaxes: dict[str, set[str]] = {}
     for f in files:
         try:
             ds = dcmread(str(f), stop_before_pixels=True, force=True)
@@ -214,14 +223,20 @@ def _contexts_for_files(files: list[Path]) -> list:
         sop = getattr(fm, "MediaStorageSOPClassUID", None) if fm else None
         ts = getattr(fm, "TransferSyntaxUID", None) if fm else None
         sop = sop or getattr(ds, "SOPClassUID", None)
-        ts = ts or ExplicitVRLittleEndian
+        ts = str(ts or ExplicitVRLittleEndian)
         if not sop:
             continue
-        key = (str(sop), str(ts))
-        if key not in contexts and len(contexts) < 128:
-            contexts[key] = build_context(sop, ts)
-    ctxs = list(contexts.values())
-    covered = {str(k[0]) for k in contexts}
+        ts_set = syntaxes.setdefault(str(sop), set())
+        ts_set.add(ts)
+        if ts in uncompressed:
+            ts_set |= uncompressed      # offer the sibling uncompressed syntax too
+    ctxs = []
+    covered: set[str] = set()
+    for sop, ts_set in syntaxes.items():
+        if len(ctxs) >= 128:
+            break
+        ctxs.append(build_context(sop, sorted(ts_set)))
+        covered.add(sop)
     for cx in StoragePresentationContexts:
         if len(ctxs) >= 128:
             break

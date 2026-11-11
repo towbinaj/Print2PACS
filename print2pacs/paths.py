@@ -30,10 +30,20 @@ def resource_dir() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def _exe_dir() -> Path:
+def exe_dir() -> Path:
+    """The install directory that holds ``Print2PACS.exe`` (repo root from source).
+
+    Unlike :func:`resource_dir`, this is NOT ``sys._MEIPASS`` when frozen: an
+    admin file placed beside the shipped exe (e.g. the destination policy) must
+    be resolved here, not in the ephemeral PyInstaller extraction folder.
+    """
     if _frozen():
         return Path(sys.executable).resolve().parent
     return Path(__file__).resolve().parent.parent
+
+
+# Backwards-compatible internal alias.
+_exe_dir = exe_dir
 
 
 def _writable(d: Path) -> bool:

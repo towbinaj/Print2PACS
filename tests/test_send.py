@@ -115,6 +115,81 @@ def test_store_warning_counts_but_is_not_clean_success(tmp_path):
         server.shutdown()
 
 
+def test_contexts_offer_both_uncompressed_syntaxes(tmp_path):
+    # RISK-007: an uncompressed SOP class is proposed with BOTH Explicit and
+    # Implicit VR Little Endian; a compressed one is proposed as-is only.
+    from pydicom.uid import (ExplicitVRLittleEndian, ImplicitVRLittleEndian,
+                             RLELossless)
+    from print2pacs.model import StudyContext
+
+    ctx = StudyContext(study_uid="1.2.3.4.5", patient_id="P1", accession="A1")
+    expl = sc_import.save_datasets(
+        sc_import.convert_pages(
+            [sc_import.SourcePage(Image.new("L", (8, 8), 1), "a")],
+            ctx, SeriesInfo()), tmp_path / "e")
+    rle = sc_import.save_datasets(
+        sc_import.convert_pages(
+            [sc_import.SourcePage(Image.new("RGB", (8, 8), (1, 2, 3)), "b")],
+            ctx, SeriesInfo(), compression="rle"), tmp_path / "r")
+
+    ctxs = scu._contexts_for_files(expl)
+    sc_ctx = next(c for c in ctxs
+                  if str(c.abstract_syntax) == str(sc_import.SC_SOP_CLASS_UID))
+    ts = {str(t) for t in sc_ctx.transfer_syntax}
+    assert str(ExplicitVRLittleEndian) in ts
+    assert str(ImplicitVRLittleEndian) in ts        # sibling offered too
+
+    rle_ctxs = scu._contexts_for_files(rle)
+    rle_ctx = next(c for c in rle_ctxs
+                   if str(c.abstract_syntax) == str(sc_import.SC_SOP_CLASS_UID))
+    rle_ts = {str(t) for t in rle_ctx.transfer_syntax}
+    assert rle_ts == {str(RLELossless)}             # compressed proposed as-is
+
+
+def test_store_to_implicit_vr_only_scp(tmp_path):
+    # RISK-007: an SCP that accepts ONLY Implicit VR LE for the SOP class must
+    # still receive our Explicit-VR Secondary Capture objects (pynetdicom
+    # re-encodes to the negotiated uncompressed syntax).
+    import socket
+
+    from pydicom.uid import ExplicitVRLittleEndian, ImplicitVRLittleEndian
+    from pynetdicom import AE, evt
+    from pynetdicom.sop_class import SecondaryCaptureImageStorage
+
+    from print2pacs.model import Node, StudyContext
+
+    received = []
+
+    def handle_store(event):
+        ds = event.dataset
+        ds.file_meta = event.file_meta
+        received.append(ds)
+        return 0x0000
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+
+    ae = AE(ae_title="IMPLPACS")
+    ae.add_supported_context(SecondaryCaptureImageStorage,
+                             ImplicitVRLittleEndian)      # Implicit ONLY
+    server = ae.start_server(("127.0.0.1", port), block=False,
+                             evt_handlers=[(evt.EVT_C_STORE, handle_store)])
+    try:
+        node = Node(name="i", aetitle="IMPLPACS", host="127.0.0.1", port=port)
+        ctx = StudyContext(study_uid="1.2.3.4.5", patient_id="P1", accession="A1")
+        datasets = sc_import.convert_pages(
+            [sc_import.SourcePage(Image.new("L", (8, 8), 7), "a")],
+            ctx, SeriesInfo())
+        assert datasets[0].file_meta.TransferSyntaxUID == ExplicitVRLittleEndian
+        result = send.send_series("ME", node, datasets, tmp_path / "impl")
+        assert result.sent == 1 and result.failed == 0
+        assert received[0].file_meta.TransferSyntaxUID == ImplicitVRLittleEndian
+    finally:
+        server.shutdown()
+
+
 def test_new_job_dir_is_unique_and_contained(tmp_path, monkeypatch):
     from print2pacs import paths
 

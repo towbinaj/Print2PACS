@@ -73,7 +73,11 @@ POLICY_FILENAME = "destinations.policy.json"
 
 
 def policy_path():
-    return paths.resource_dir() / POLICY_FILENAME
+    # Must be the real install dir (beside Print2PACS.exe), NOT resource_dir():
+    # when frozen, resource_dir() is the ephemeral %TEMP%\_MEIxxxx extraction
+    # folder, so an admin policy dropped next to the exe would be silently
+    # ignored and all destinations would stay unlocked.
+    return paths.exe_dir() / POLICY_FILENAME
 
 
 def load_destination_policy() -> dict | None:
