@@ -84,6 +84,27 @@ def test_wildcard_only_query_is_rejected():
             reconcile.lookup_studies("ME", node, accession=acc, patient_id=pid)
 
 
+def test_c_find_has_default_result_cap(monkeypatch):
+    # Engine hardening: a direct c_find caller (no reconcile wrapper) is still
+    # bounded by a default result ceiling, so an over-broad query can't buffer an
+    # unbounded match set.
+    from print2pacs.net import scu
+    monkeypatch.setattr(scu, "DEFAULT_FIND_LIMIT", 2)
+
+    def handler(event):
+        for i in range(5):
+            yield 0xFF00, _match(f"ACC{i}", f"1.2.3.{i}")
+        yield 0x0000, None
+
+    srv, node = _find_server(handler)
+    try:
+        res = scu.c_find("ME", node, scu.build_query("STUDY", AccessionNumber=""))
+        assert res.truncated is True
+        assert len(res.datasets) == 2
+    finally:
+        srv.shutdown()
+
+
 def test_wildcard_in_accession_is_rejected():
     # RISK-006: the accession must be an exact match -- no wildcards allowed.
     from print2pacs.model import Node

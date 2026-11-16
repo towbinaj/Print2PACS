@@ -147,6 +147,11 @@ _FIND_MODELS = {
     "STUDY": StudyRootQueryRetrieveInformationModelFind,
 }
 
+# Safety ceiling for a direct c_find caller (toolkit use without the reconcile
+# wrapper, which sets its own, lower cap). Bounds result buffering so an
+# over-broad/universal query can't buffer an unbounded match set in memory.
+DEFAULT_FIND_LIMIT = 500
+
 
 def build_query(level: str, **criteria: str) -> Dataset:
     """Build a C-FIND identifier. Empty-string values are 'return this attr'."""
@@ -161,6 +166,11 @@ def c_find(my_aetitle: str, node: Node, identifier: Dataset,
            model: str = "STUDY", timeout: int | None = None,
            progress: Progress = _noop, tls_args=None,
            max_results: int | None = None) -> FindResult:
+    # Default to a bounded result ceiling so a direct caller (toolkit use without
+    # the reconcile wrapper) can't buffer an unbounded match set. Resolved here,
+    # not in the signature, so the ceiling stays tunable at runtime.
+    if max_results is None:
+        max_results = DEFAULT_FIND_LIMIT
     timeout = timeout or max(node.timeout, 60)
     result = FindResult()
     find_model = _FIND_MODELS[model.upper()]
@@ -207,13 +217,24 @@ def _contexts_for_files(files: list[Path]) -> list:
     For an uncompressed object (Explicit or Implicit VR Little Endian) we propose
     BOTH uncompressed syntaxes for that SOP class, so an SCP that accepts only the
     other uncompressed syntax still negotiates a context (RISK-007). The two are
-    losslessly interconvertible and pynetdicom re-encodes on send. Compressed
-    syntaxes (RLE, JPEG, H.264, ...) are proposed exactly as stored: the pixel
-    data is encoded for that one syntax and cannot be re-expressed here.
+    losslessly interconvertible and pynetdicom re-encodes on send.
+
+    EXCEPTION -- 8-bit pixel data stays Explicit VR LE only: Implicit VR carries
+    no VR on the wire, so 8-bit PixelData is reconstructed by the receiver as VR
+    OW, which strict archives reject for BitsAllocated=8 (they require OB). So if
+    any object of a SOP class is 8-bit uncompressed, that SOP class is offered as
+    Explicit VR LE only -- guaranteeing the OB form end-to-end. (16-bit is OW
+    under either syntax, so it is safe to offer both.) An 8-bit-only SCP that
+    speaks solely Implicit VR then cannot receive 8-bit objects -- a clean,
+    visible association failure, not a silently mislabeled object.
+
+    Compressed syntaxes (RLE, JPEG, H.264, ...) are proposed exactly as stored:
+    the pixel data is encoded for that one syntax and cannot be re-expressed here.
     """
     from pydicom.uid import ExplicitVRLittleEndian, ImplicitVRLittleEndian
     uncompressed = {str(ExplicitVRLittleEndian), str(ImplicitVRLittleEndian)}
     syntaxes: dict[str, set[str]] = {}
+    eight_bit: set[str] = set()         # SOP classes with an 8-bit uncompressed obj
     for f in files:
         try:
             ds = dcmread(str(f), stop_before_pixels=True, force=True)
@@ -226,16 +247,24 @@ def _contexts_for_files(files: list[Path]) -> list:
         ts = str(ts or ExplicitVRLittleEndian)
         if not sop:
             continue
-        ts_set = syntaxes.setdefault(str(sop), set())
-        ts_set.add(ts)
-        if ts in uncompressed:
-            ts_set |= uncompressed      # offer the sibling uncompressed syntax too
+        sop = str(sop)
+        syntaxes.setdefault(sop, set()).add(ts)
+        if ts in uncompressed and int(getattr(ds, "BitsAllocated", 0) or 0) == 8:
+            eight_bit.add(sop)
     ctxs = []
     covered: set[str] = set()
     for sop, ts_set in syntaxes.items():
         if len(ctxs) >= 128:
             break
-        ctxs.append(build_context(sop, sorted(ts_set)))
+        out = set(ts_set)
+        if out & uncompressed:
+            if sop in eight_bit:
+                # Keep OB: never offer Implicit VR for an 8-bit SOP class.
+                out.discard(str(ImplicitVRLittleEndian))
+                out.add(str(ExplicitVRLittleEndian))
+            else:
+                out |= uncompressed     # 16-bit: safe to offer both
+        ctxs.append(build_context(sop, sorted(out)))
         covered.add(sop)
     for cx in StoragePresentationContexts:
         if len(ctxs) >= 128:

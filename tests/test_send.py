@@ -115,50 +115,48 @@ def test_store_warning_counts_but_is_not_clean_success(tmp_path):
         server.shutdown()
 
 
-def test_contexts_offer_both_uncompressed_syntaxes(tmp_path):
-    # RISK-007: an uncompressed SOP class is proposed with BOTH Explicit and
-    # Implicit VR Little Endian; a compressed one is proposed as-is only.
+def test_contexts_8bit_explicit_only_16bit_both(tmp_path):
+    # RISK-007 + T05: a 16-bit uncompressed SOP class is offered with BOTH Explicit
+    # and Implicit VR LE, but an 8-bit one is offered as Explicit VR LE ONLY -- so
+    # 8-bit pixel data keeps VR OB end-to-end (Implicit VR reconstructs it as OW,
+    # which strict archives reject). A compressed object is proposed as-is.
     from pydicom.uid import (ExplicitVRLittleEndian, ImplicitVRLittleEndian,
                              RLELossless)
     from print2pacs.model import StudyContext
 
     ctx = StudyContext(study_uid="1.2.3.4.5", patient_id="P1", accession="A1")
-    expl = sc_import.save_datasets(
+
+    def sc_ctx(files):
+        return next(c for c in scu._contexts_for_files(files)
+                    if str(c.abstract_syntax) == str(sc_import.SC_SOP_CLASS_UID))
+
+    eight = sc_import.save_datasets(
         sc_import.convert_pages(
             [sc_import.SourcePage(Image.new("L", (8, 8), 1), "a")],
-            ctx, SeriesInfo()), tmp_path / "e")
+            ctx, SeriesInfo()), tmp_path / "e8")
+    assert {str(t) for t in sc_ctx(eight).transfer_syntax} == \
+        {str(ExplicitVRLittleEndian)}               # 8-bit: Explicit only (OB)
+
+    sixteen = sc_import.save_datasets(
+        sc_import.convert_pages(
+            [sc_import.SourcePage(Image.new("I", (8, 8), 1000), "b")],
+            ctx, SeriesInfo()), tmp_path / "e16")
+    ts16 = {str(t) for t in sc_ctx(sixteen).transfer_syntax}
+    assert str(ExplicitVRLittleEndian) in ts16 and str(ImplicitVRLittleEndian) in ts16
+
     rle = sc_import.save_datasets(
         sc_import.convert_pages(
-            [sc_import.SourcePage(Image.new("RGB", (8, 8), (1, 2, 3)), "b")],
+            [sc_import.SourcePage(Image.new("RGB", (8, 8), (1, 2, 3)), "c")],
             ctx, SeriesInfo(), compression="rle"), tmp_path / "r")
-
-    ctxs = scu._contexts_for_files(expl)
-    sc_ctx = next(c for c in ctxs
-                  if str(c.abstract_syntax) == str(sc_import.SC_SOP_CLASS_UID))
-    ts = {str(t) for t in sc_ctx.transfer_syntax}
-    assert str(ExplicitVRLittleEndian) in ts
-    assert str(ImplicitVRLittleEndian) in ts        # sibling offered too
-
-    rle_ctxs = scu._contexts_for_files(rle)
-    rle_ctx = next(c for c in rle_ctxs
-                   if str(c.abstract_syntax) == str(sc_import.SC_SOP_CLASS_UID))
-    rle_ts = {str(t) for t in rle_ctx.transfer_syntax}
-    assert rle_ts == {str(RLELossless)}             # compressed proposed as-is
+    assert {str(t) for t in sc_ctx(rle).transfer_syntax} == {str(RLELossless)}
 
 
-def test_store_to_implicit_vr_only_scp(tmp_path):
-    # RISK-007: an SCP that accepts ONLY Implicit VR LE for the SOP class must
-    # still receive our Explicit-VR Secondary Capture objects (pynetdicom
-    # re-encodes to the negotiated uncompressed syntax).
+def _implicit_only_scp(received):
     import socket
-
-    from pydicom.uid import ExplicitVRLittleEndian, ImplicitVRLittleEndian
+    from pydicom.uid import ImplicitVRLittleEndian
     from pynetdicom import AE, evt
     from pynetdicom.sop_class import SecondaryCaptureImageStorage
-
-    from print2pacs.model import Node, StudyContext
-
-    received = []
+    from print2pacs.model import Node
 
     def handle_store(event):
         ds = event.dataset
@@ -170,24 +168,53 @@ def test_store_to_implicit_vr_only_scp(tmp_path):
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
-
     ae = AE(ae_title="IMPLPACS")
-    ae.add_supported_context(SecondaryCaptureImageStorage,
-                             ImplicitVRLittleEndian)      # Implicit ONLY
-    server = ae.start_server(("127.0.0.1", port), block=False,
-                             evt_handlers=[(evt.EVT_C_STORE, handle_store)])
+    ae.add_supported_context(SecondaryCaptureImageStorage, ImplicitVRLittleEndian)
+    srv = ae.start_server(("127.0.0.1", port), block=False,
+                          evt_handlers=[(evt.EVT_C_STORE, handle_store)])
+    return srv, Node(name="i", aetitle="IMPLPACS", host="127.0.0.1", port=port)
+
+
+def test_store_16bit_to_implicit_vr_only_scp(tmp_path):
+    # RISK-007 (still applies to 16-bit): an Implicit-VR-only SCP receives our
+    # 16-bit object, reconstructed as VR OW -- which is correct for BitsAllocated=16.
+    from pydicom.uid import ImplicitVRLittleEndian
+    from print2pacs.model import StudyContext
+
+    received = []
+    srv, node = _implicit_only_scp(received)
     try:
-        node = Node(name="i", aetitle="IMPLPACS", host="127.0.0.1", port=port)
+        ctx = StudyContext(study_uid="1.2.3.4.5", patient_id="P1", accession="A1")
+        datasets = sc_import.convert_pages(
+            [sc_import.SourcePage(Image.new("I", (8, 8), 1000), "a")],
+            ctx, SeriesInfo())
+        assert datasets[0].BitsAllocated == 16
+        result = send.send_series("ME", node, datasets, tmp_path / "impl16")
+        assert result.sent == 1 and result.failed == 0
+        assert received[0].file_meta.TransferSyntaxUID == ImplicitVRLittleEndian
+        assert received[0]["PixelData"].VR == "OW"      # 16-bit -> OW (consistent)
+    finally:
+        srv.shutdown()
+
+
+def test_8bit_not_sent_to_implicit_only_scp(tmp_path):
+    # T05: an 8-bit object is never offered over Implicit VR, so an Implicit-only
+    # SCP cannot receive it -- a clean failure (nothing stored), never a silently
+    # mislabeled (OW) 8-bit object.
+    from print2pacs.model import StudyContext
+
+    received = []
+    srv, node = _implicit_only_scp(received)
+    try:
         ctx = StudyContext(study_uid="1.2.3.4.5", patient_id="P1", accession="A1")
         datasets = sc_import.convert_pages(
             [sc_import.SourcePage(Image.new("L", (8, 8), 7), "a")],
             ctx, SeriesInfo())
-        assert datasets[0].file_meta.TransferSyntaxUID == ExplicitVRLittleEndian
-        result = send.send_series("ME", node, datasets, tmp_path / "impl")
-        assert result.sent == 1 and result.failed == 0
-        assert received[0].file_meta.TransferSyntaxUID == ImplicitVRLittleEndian
+        result = send.send_series("ME", node, datasets, tmp_path / "impl8")
+        assert result.sent == 0                         # no common context -> unsent
+        assert received == []
     finally:
-        server.shutdown()
+        srv.shutdown()
 
 
 def test_new_job_dir_is_unique_and_contained(tmp_path, monkeypatch):
